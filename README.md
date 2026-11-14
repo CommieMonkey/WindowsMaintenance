@@ -1,12 +1,8 @@
-# WindowsMaintenance
-Maintenance script for Windows Systems
-
-
 # Run-Maintenance
 
 Automated Windows PC maintenance in one script, using **only tools that are built into Windows**: winget, Disk Cleanup (cleanmgr), DISM, SFC, Windows Defender, System Restore and the built-in drive optimizer.
 
-Start it, pick the steps you want (or just press Enter for everything), and it works through them, logs what it did, and tells you how much space it freed.
+Start it and a simple window opens: tick the things you want, press **Start maintenance**, and it works through them, logs what it did, and tells you how much space it freed. No command line needed.
 
 ---
 
@@ -16,7 +12,7 @@ Start it, pick the steps you want (or just press Enter for everything), and it w
 2. [What is in the package](#what-is-in-the-package)
 3. [Requirements](#requirements)
 4. [Quick start](#quick-start)
-5. [The step menu](#the-step-menu)
+5. [The window](#the-window)
 6. [What each step does](#what-each-step-does)
 7. [Command-line parameters](#command-line-parameters)
 8. [Safety design](#safety-design)
@@ -33,7 +29,8 @@ Start it, pick the steps you want (or just press Enter for everything), and it w
 
 ## Features
 
-- **Pick your steps.** An interactive menu lets you run everything or only a selection such as `1,3,5,6` or `2-4`.
+- **A real window, made for beginners.** Plain-language checkboxes for every step, one big Start button, live progress and a clear "All done" summary.
+- **Advanced view on demand.** Tick one box to get a dropdown with settings for each step (how many restore points to keep, scan type, which drives, and more).
 - **Only built-in tools.** Nothing to install except what Windows already ships (winget comes with Windows 10/11's "App Installer").
 - **Safe by design.** Deliberately conservative deletion rules for temp files, protected cleanmgr categories, junction/symlink protection and a restore point before anything happens.
 - **Restore point rotation.** Creates a fresh restore point each run and keeps the last 2 of its own, so restore points never pile up.
@@ -41,7 +38,7 @@ Start it, pick the steps you want (or just press Enter for everything), and it w
 - **Real logging.** A full transcript per run plus a CSV history with one row per step per run (status, duration, error message).
 - **Resilient.** A failing step is logged and the script carries on with the next one. Hung steps have timeouts.
 - **Self-elevating.** Asks for administrator rights (UAC prompt) when needed.
-- **Unattended mode.** `-All` / `-Steps` skip the menu, so it works in a scheduled task.
+- **Unattended mode.** `-All` / `-Steps` skip the window, so it works in a scheduled task.
 
 ---
 
@@ -51,10 +48,12 @@ Start it, pick the steps you want (or just press Enter for everything), and it w
 |---|---|
 | `Run-Maintenance.ps1` | The script. This is the actual program. |
 | `Run-Maintenance.cmd` | Double-click launcher. Runs the script with the execution policy bypassed **for that one run only**, so you don't have to type a long command. |
-| `Run-Maintenance.exe` | Compiled version of the script. See [The EXE version](#the-exe-version). |
+| `Run-Maintenance.exe` | The same tool as one single file: double-click, accept the admin prompt, done. You create it yourself with `Build-Exe.cmd` (see [The EXE version](#the-exe-version)). |
+| `Build-Exe.cmd` | Double-click to build `Run-Maintenance.exe`. Uses the compiler that is built into Windows. |
+| `Launcher.cs`, `app.manifest` | Source of the small launcher program inside the exe, and its "ask for administrator" manifest. Needed by `Build-Exe.cmd`. |
 | `README.md` | This file. |
 
-Keep the `.cmd` in the **same folder** as the `.ps1`.
+Keep `Run-Maintenance.cmd` in the **same folder** as the `.ps1`. (The finished `.exe` needs no other files.)
 
 ---
 
@@ -77,7 +76,7 @@ System Protection (System Restore) is turned on for the system drive if it was o
 1. Put `Run-Maintenance.cmd` and `Run-Maintenance.ps1` in the same folder.
 2. Double-click **`Run-Maintenance.cmd`**.
 3. Accept the Windows admin prompt (UAC).
-4. Choose your steps in the menu.
+4. Tick the steps you want (everything is ticked by default) and press **Start maintenance**.
 
 ### Option B: from a terminal
 
@@ -101,42 +100,51 @@ Files downloaded from the internet may additionally need `Unblock-File .\Run-Mai
 
 ---
 
-## The step menu
+## The window
 
-When you start the script without `-All` or `-Steps`, you get:
+Start the tool without parameters and this window opens (the black console window hides itself while it is open).
 
-```
-Which maintenance steps do you want to run?
+**Choosing what to do**
 
-  1  Restore point (keeps the last 2)
-  2  Update software (winget)
-  3  Disk cleanup (cleanmgr)
-  4  Temp files, recycle bin, DNS cache
-  5  System repair (DISM + SFC) - slow, 10-20 min
-  6  Defender update + quick scan
-  7  Optimize drives (TRIM/defrag)
-  8  Disk health report
+- Every step has a checkbox, a plain-language title, a short explanation and an estimate of how long it takes. Everything is ticked by default.
+- Three quick buttons at the top: **Select everything**, **Select nothing** and **Everything except the slow repair**.
+- At the bottom a line shows your **power status**. On a laptop that is running on battery it turns red, and the Start button will refuse to start until you plug in the charger.
+- Press **Start maintenance**. A short confirmation reminds you to save your work (and tells you if the Recycle Bin is going to be emptied for good).
 
-  A  All steps (normal run)  [default - just press Enter]
-  Q  Quit
+**While it runs**
 
-Examples:  1,3,5,6    2-4    A
-```
+- A list shows every selected step as *Waiting*, *Running...*, *Done*, *Failed* or *Skipped*, with a progress bar for the whole run and a line saying what it is doing right now.
+- **Show technical details** reveals the full text output (the same text that is saved in the log file).
+- **Stop after this step** finishes the step that is running and skips the rest. It never kills a step halfway, because stopping a repair or an update in the middle is riskier than waiting.
+- The window cannot be closed by accident while maintenance is running.
+- **Open log folder** opens `%USERPROFILE%\MaintenanceLogs`.
 
-What you can type:
+**When it is finished**
 
-| Input | Result |
+You see "All done!" (or a warning if some steps failed), how much space was freed, how long it took and whether Windows would like a restart. **Back to options** returns to the first screen.
+
+### Advanced options
+
+Tick **Show advanced options** (bottom left) and a dropdown row appears under every step. The dropdowns only count while that box is ticked; untick it and the safe defaults are used. Default choices are marked "(recommended)" in the window and in **bold** here.
+
+| Step | Dropdown | Choices |
+|---|---|---|
+| 1 Restore point | Restore points to keep | 1, **2**, 3, 4, 5 |
+| 2 Update programs | Installer windows | **Show them if an installer needs one**, Never show them (silent) |
+| 3 Free up disk space | Cleanup strength | **Standard**, Gentle (also keeps old driver packages and crash dumps, and the Recycle Bin) |
+| 4 Temp files | Delete temp files older than | 1 day, **3 days**, 7 days, 30 days |
+| 4 Temp files | Recycle Bin (also applies to step 3) | **Empty it**, Leave it alone |
+| 5 System repair | What to run | **DISM + SFC**, SFC only (faster), DISM only |
+| 6 Defender | Scan type | **Quick scan**, Update definitions only, Full scan (can take hours) |
+| 7 Optimize drives | Which drives | **All drives**, or one specific drive letter |
+| 8 Disk health | none | |
+
+Two more settings apply to the whole run:
+
+| Setting | Choices |
 |---|---|
-| `A`, `all` or just **Enter** | Run all 8 steps |
-| `1,3,5,6` | Steps 1, 3, 5 and 6 |
-| `1 3 5 6` or `1,3,5 and 6` | Same thing. Any separators work |
-| `2-4` | Steps 2, 3 and 4 |
-| `1,4-6` | Lists and ranges can be combined |
-| `Q` | Quit without doing anything |
-
-Invalid input (for example `9`) simply asks again. Steps you did not select are recorded as *Skipped (Not selected)* in the history file.
-
-When a run was started from the menu, the window stays open at the end with "Press Enter to close this window", so you can read the summary.
+| Charger check | **Laptop must be plugged in**, Skip the charger check |
+| When finished | **Do nothing**, Restart my PC (you get a 60 second warning and can cancel it) |
 
 ---
 
@@ -144,7 +152,7 @@ When a run was started from the menu, the window stays open at the end with "Pre
 
 ### 1. Restore point
 
-Creates a System Restore point named `Before maintenance <date time>`, then removes older restore points **that this script created** so that 2 remain in total (the new one plus the newest previous one).
+Creates a System Restore point named `Before maintenance <date time>`, then removes older restore points **that this script created** so that only the number you chose remain (2 by default: the new one plus the newest previous one).
 
 - Restore points created by Windows, by installers or by you are never touched.
 - Old restore points are only deleted **after** the new one was created successfully.
@@ -157,7 +165,7 @@ Runs `winget upgrade --all` with agreements accepted.
 
 - `--include-unknown` is deliberately **not** used, so packages whose installed version winget cannot read are left alone.
 - By default installers may show their own windows (some installers cannot run silently and would hang otherwise). Check your taskbar if it seems stuck.
-- Add `-SilentWinget` to force `--silent` (recommended for unattended runs only).
+- In the window, the advanced option *Installer windows: Never show them* forces `--silent`; unattended runs use the `-SilentWinget` switch (recommended for unattended runs only).
 - To keep a package at a specific version, use `winget pin add <id>`.
 
 ### 3. Disk cleanup (cleanmgr)
@@ -177,8 +185,8 @@ Builds a temporary Disk Cleanup profile, runs `cleanmgr /sagerun`, and removes t
 
 ### 4. Temp files, recycle bin, DNS cache
 
-- **Temp files:** cleans your `%TEMP%` folder and `C:\Windows\Temp`. See [Safety design](#safety-design) for the strict rules.
-- **Recycle Bin:** emptied for all drives. **This is permanent.**
+- **Temp files:** cleans your `%TEMP%` folder and `C:\Windows\Temp` (files older than 3 days by default; adjustable in the advanced options). See [Safety design](#safety-design) for the strict rules.
+- **Recycle Bin:** emptied for all drives. **This is permanent.** You can switch this off in the advanced options (*Leave it alone*), which also protects the Recycle Bin from step 3.
 - **DNS cache:** flushed with `ipconfig /flushdns`.
 
 The step prints how many files it found, how many MB they take, a counter while deleting, and how many files were in use and therefore left alone.
@@ -213,8 +221,8 @@ A summary table of every step (status, duration, message), total time, space fre
 
 | Parameter | Description |
 |---|---|
-| `-All` | Run every step without showing the menu. Use this for scheduled tasks. |
-| `-Steps "1,3,5-6"` | Run only these steps, without the menu. Accepts lists and ranges. |
+| `-All` | Run every step without opening the window. Use this for scheduled tasks. |
+| `-Steps "1,3,5-6"` | Run only these steps, without the window. Accepts lists and ranges. |
 | `-SilentWinget` | Run winget with `--silent` (no installer windows). |
 | `-IgnorePower` | Skip the charger check (see below). |
 | `-SkipRestorePoint` | Don't run step 1. Existing restore points are left untouched. |
@@ -222,17 +230,21 @@ A summary table of every step (status, duration, message), total time, space fre
 | `-SkipDefender` | Don't run step 6. |
 | `-Reboot` | Reboot automatically 30 seconds after finishing. Uses a forced restart, so save your work first. |
 
-The `-Skip...` switches also suppress the menu (they run "everything except these").
+The `-Skip...` switches also suppress the window (they run "everything except these").
+
+Starting the tool **without** any of these parameters opens the window. The parameters are meant for unattended use; in the window you simply tick boxes instead (the options in the table that only make sense unattended, such as `-SilentWinget`, have an equivalent in the advanced options).
 
 Examples:
 
 ```powershell
-.\Run-Maintenance.ps1                       # show the menu
-.\Run-Maintenance.ps1 -All                  # everything, no menu
+.\Run-Maintenance.ps1                       # open the window
+.\Run-Maintenance.ps1 -All                  # everything, no window
 .\Run-Maintenance.ps1 -Steps "1,3,5-6"      # only steps 1, 3, 5 and 6
 .\Run-Maintenance.ps1 -All -SkipSFC         # everything except the slow repair
 .\Run-Maintenance.ps1 -All -SilentWinget -Reboot
 ```
+
+The same parameters work with `Run-Maintenance.exe` and `Run-Maintenance.cmd`.
 
 Through the launcher:
 
@@ -285,7 +297,8 @@ This script deletes files and changes system state, so it is built defensively. 
 
 Interrupted power during DISM, SFC, an installer or a defrag is the most realistic way to damage a Windows installation, so the script insists on a charger:
 
-- **At the start:** if a laptop is on battery, the script waits up to **10 minutes** for you to plug in the charger. If it is still unplugged, it aborts **before changing anything**.
+- **In the window:** the power status is shown at the bottom, and the Start button refuses to start on battery.
+- **At the start of the run:** if a laptop is on battery, the script waits up to **10 minutes** for you to plug in the charger. If it is still unplugged, it aborts **before changing anything**.
 - **Before every step:** power is checked again. If you unplug in the middle of a run, the next step waits for the charger. After 10 minutes the remaining steps are skipped and logged.
 - **Desktops** (no battery) always pass.
 - **Limit:** unplugging *during* a step cannot be detected. The check happens between steps.
@@ -305,7 +318,7 @@ Everything is written to:
 
 | File | Content |
 |---|---|
-| `Maintenance_<yyyy-MM-dd_HH-mm>.log` | Full transcript of that run: everything printed to the console. |
+| `Maintenance_<yyyy-MM-dd_HH-mm>.log` | Everything that happened during that run (the same text as "Show technical details" in the window). |
 | `MaintenanceHistory.csv` | One row per step per run. Grows over time; open it in Excel. |
 
 `MaintenanceHistory.csv` columns:
@@ -324,7 +337,7 @@ Transcripts older than **90 days** are deleted automatically. The CSV is never t
 
 ## Running it automatically (scheduled task)
 
-Always use `-All` (or `-Steps`) so the script never waits for menu input. Add `-SilentWinget` because a scheduled task has no desktop to show installer windows on.
+Always use `-All` (or `-Steps`) so the script runs without opening the window. Add `-SilentWinget` because a scheduled task has no desktop to show installer windows on.
 
 ```powershell
 $action  = New-ScheduledTaskAction -Execute "powershell.exe" `
@@ -346,31 +359,62 @@ Notes for scheduled runs:
 
 ## The EXE version
 
-`Run-Maintenance.exe` is a compiled wrapper around the same script, for people who prefer double-clicking one file.
+`Run-Maintenance.exe` is the same tool as a single file, for people who prefer double-clicking one thing. It opens the same window.
 
-- **Run as administrator.** The EXE should request administrator rights through its manifest, so you get the normal UAC prompt when you start it. (If you build it yourself, make sure to enable this, for example with the `-requireAdmin` option of PS2EXE.) The script's own self-elevation relies on the `.ps1` file path, which does not exist inside a compiled EXE, so the EXE must already start elevated.
-- **Parameters** can be passed on the command line, just like the script: `Run-Maintenance.exe -All`.
-- **Antivirus / SmartScreen** may flag or warn about unsigned EXEs that were compiled from scripts. This is a common false positive. If you do not trust a prebuilt EXE, run the `.ps1` through the `.cmd` launcher instead, or rebuild the EXE yourself from the script.
-- **Keep the `.ps1` as the source of truth.** After you change the script, rebuild the EXE.
+### Building it (once, and again after every change to the script)
 
-Example of rebuilding with the PS2EXE module (adjust to however your EXE is built):
+You need nothing except Windows itself. The build uses `csc.exe`, the C# compiler that is part of the .NET Framework that ships with Windows 10 and 11.
 
-```powershell
-Install-Module ps2exe -Scope CurrentUser
-Invoke-ps2exe .\Run-Maintenance.ps1 .\Run-Maintenance.exe -requireAdmin
+1. Put these four files in one folder: `Run-Maintenance.ps1`, `Launcher.cs`, `app.manifest`, `Build-Exe.cmd`.
+2. Double-click **`Build-Exe.cmd`**.
+3. A few seconds later `Run-Maintenance.exe` appears in the same folder. You can copy that one file anywhere.
+
+Optional: put an icon file named `app.ico` in the folder before building to give the exe an icon.
+
+### How it works
+
+The exe is a small launcher with the PowerShell script **embedded inside it**:
+
+1. Windows asks for administrator rights when you start it (UAC prompt), because the exe's manifest requires it.
+2. The launcher unpacks the script into a temporary folder under `C:\Program Files\PCMaintenance\`, which only administrators can write to. This matters: a temporary folder in your normal user profile could be tampered with by other programs while the script runs with administrator rights.
+3. It runs the script with Windows PowerShell and waits for it to finish.
+4. It deletes the unpacked script again (and cleans up leftovers of any run that was killed).
+
+Started **without arguments** you only see the maintenance window. Started **with arguments** it runs unattended and prints its output in the terminal it was started from:
+
+```
+Run-Maintenance.exe -All
+Run-Maintenance.exe -Steps "1,3,5-6" -SilentWinget
 ```
 
-Build it as a **console** application (not "no console"), because the menu and progress output use the console.
+The exit code of the script is passed through. For a scheduled task, point the task at the exe with `-All -SilentWinget` and tick "Run with highest privileges".
+
+### Things to know
+
+- **SmartScreen.** The exe is not digitally signed, so the first time Windows may show "Windows protected your PC". Click **More info**, then **Run anyway**. Signing it requires a code-signing certificate, which costs money.
+- **Antivirus.** Some antivirus programs distrust small unsigned programs that unpack a script and start PowerShell with `-ExecutionPolicy Bypass`, because malware does the same. This is a false positive, but you may have to allow the file. You build the exe yourself from files you can read, so you can verify exactly what is inside.
+- **Managed PCs.** On a PC where an administrator has set a PowerShell execution policy through Group Policy, the `-ExecutionPolicy Bypass` option is overruled and the script will not start.
+- **Updating.** The script is baked into the exe. After you change `Run-Maintenance.ps1`, run `Build-Exe.cmd` again.
+- **Alternative.** `Run-Maintenance.cmd` runs the plain `.ps1` and needs no building.
 
 ---
 
 ## Troubleshooting
 
+**The window does not open, or an error box appears**
+The error box tells you what failed. Run it once from a command prompt with `Run-Maintenance.cmd` and send the message to the maintainer. As a fallback you can always run the unattended mode, for example `Run-Maintenance.cmd -All`.
+
+**The window says "Maintenance is still running" and will not close**
+This is on purpose: closing it mid-run could leave an update or repair half finished. Press **Stop after this step** and wait for the current step to end.
+
+**Nothing seems to happen for a long time on one step**
+The little moving bar under the progress bar means it is still working. Tick **Show technical details** to watch the output. Some tools (SFC in particular) only print their result at the end.
+
 **"Running scripts is disabled on this system" / double-clicking opens Notepad**
 Use `Run-Maintenance.cmd`, or run `powershell -ExecutionPolicy Bypass -File .\Run-Maintenance.ps1`. See [Quick start](#quick-start).
 
-**The script seems to freeze while I'm watching it**
-In the classic console window, clicking inside the window enters "Select" mode and pauses all output until you press Enter. The script turns this off for its own window, but if the window title ever starts with "Select", press **Enter** or **Esc**.
+**The unattended mode (console window) seems to freeze**
+In the classic console window, clicking inside the window enters "Select" mode and pauses all output until you press Enter. The script turns this off for its own console, but if the title ever starts with "Select", press **Enter** or **Esc**. This does not affect the normal window.
 
 **Step 2 (winget) hangs**
 An installer is probably showing a window that is hidden behind other windows or waiting for a click. Check the taskbar. For unattended runs use `-SilentWinget`. Packages that cannot update silently may need to be updated by hand. Per-user apps (such as some chat or music apps) sometimes dislike being updated from an elevated session; update those normally from the app itself.
@@ -426,7 +470,11 @@ Yes: edit the `$exclude` list at the top of step 3 in the script (wildcards allo
 ## Known limitations
 
 - Built for Windows 10/11 and Windows PowerShell 5.1. Not tested on older Windows versions or on PowerShell 7.
+- The exe is a launcher around the script and must be rebuilt (`Build-Exe.cmd`) after script changes. It has not been tested on every Windows version.
+- The window uses classic Windows Forms and is not tuned for very high display scaling (text may look slightly soft on some screens).
 - Power loss **during** a step cannot be prevented, only between steps.
+- The window shows no live percentage for SFC and DISM, only their output when they finish a line.
+- "Stop after this step" cannot interrupt a step that is already running.
 - winget can only update what is in its repositories; software not listed there is skipped.
 - Temp cleanup skips files in use; some may remain until the next run.
 - The exit code does not reflect failed steps (see the CSV).
