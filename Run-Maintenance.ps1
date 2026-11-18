@@ -43,6 +43,13 @@
     Unattended mode: skip the charger check.
 .PARAMETER Reboot
     Unattended mode: restart the PC 30 seconds after finishing.
+.PARAMETER Mode
+    Auto (default), Pc or Server. Auto picks Server on Windows Server and Pc on
+    Windows 10/11. Only the steps that belong to the mode are offered or run.
+
+Exit code (unattended mode): 0 = all fine, 1 = warnings (stopped by the user, or
+a step skipped because this PC cannot do it), 2 = a step failed or the run
+could not start.
 
 .EXAMPLE
     .\Run-Maintenance.ps1                    (opens the window)
@@ -59,7 +66,8 @@ param(
     [switch]$SkipRestorePoint,
     [switch]$SilentWinget,
     [switch]$IgnorePower,
-    [switch]$Reboot
+    [switch]$Reboot,
+    [ValidateSet('Auto', 'Pc', 'Server')][string]$Mode = 'Auto'
 )
 
 # ---------------------------------------------------------------- Self-elevate
@@ -115,25 +123,89 @@ function Close-RunLog {
     if ($script:LogWriter) { try { $script:LogWriter.Dispose() } catch { }; $script:LogWriter = $null }
 }
 
-# The 8 steps: Name goes into the log/CSV, Title/Desc/Time are shown in the window.
+# The step registry. Name goes into the log/CSV, Title/Desc/Time are shown in the window.
+#   Modes    which modes offer the step ('Pc', 'Server')
+#   Risk     ReadOnly | Changes | Deletes (on a server only ReadOnly steps start ticked)
+#   Requires optional check: returns a reason text when this PC cannot run the step, else nothing
 $StepInfo = @(
     @{ Id = 1; Name = 'Restore point';                   Title = 'Create a safety restore point';
-       Desc = 'Lets you undo system changes if something goes wrong. Keeps your last restore points and removes older ones made by this tool.'; Time = 'about 1 minute' },
+       Desc = 'Lets you undo system changes if something goes wrong. Keeps your last restore points and removes older ones made by this tool.'; Time = 'about 1 minute';
+       Modes = @('Pc'); Risk = 'Changes';
+       Requires = { if (-not (Get-Command Checkpoint-Computer -ErrorAction SilentlyContinue)) { 'System Restore is not available on this Windows edition.' } } },
     @{ Id = 2; Name = 'Update software (winget)';        Title = 'Update my programs';
-       Desc = 'Installs updates for your installed programs with winget, the update tool built into Windows. Some installers may open their own window.'; Time = '5 to 20 minutes' },
+       Desc = 'Installs updates for your installed programs with winget, the update tool built into Windows. Some installers may open their own window.'; Time = '5 to 20 minutes';
+       Modes = @('Pc'); Risk = 'Changes';
+       Requires = { if (-not (Get-Command winget -ErrorAction SilentlyContinue)) { "winget not found. Install 'App Installer' from the Microsoft Store." } } },
     @{ Id = 3; Name = 'Disk cleanup (cleanmgr)';         Title = 'Free up disk space';
-       Desc = 'Runs Windows Disk Cleanup. Your Downloads folder and the files Windows needs to reset itself are never touched.'; Time = '2 to 20 minutes' },
+       Desc = 'Runs Windows Disk Cleanup. Your Downloads folder and the files Windows needs to reset itself are never touched.'; Time = '2 to 20 minutes';
+       Modes = @('Pc'); Risk = 'Deletes';
+       Requires = { if (-not (Test-Path -LiteralPath "$env:SystemRoot\System32\cleanmgr.exe")) { 'Disk Cleanup (cleanmgr.exe) is not installed on this PC.' } } },
     @{ Id = 4; Name = 'Temp files, recycle bin, DNS';    Title = 'Clear temporary files and empty the Recycle Bin';
-       Desc = 'Removes old temporary files and empties the Recycle Bin (this cannot be undone). Also refreshes the network (DNS) cache.'; Time = '1 to 10 minutes' },
+       Desc = 'Removes old temporary files and empties the Recycle Bin (this cannot be undone). Also refreshes the network (DNS) cache.'; Time = '1 to 10 minutes';
+       Modes = @('Pc'); Risk = 'Deletes'; Requires = $null },
     @{ Id = 5; Name = 'System repair (DISM + SFC)';      Title = 'Check and repair Windows system files';
-       Desc = 'Scans Windows for damaged files and repairs them. This is the slowest step.'; Time = '10 to 30 minutes' },
+       Desc = 'Scans Windows for damaged files and repairs them. This is the slowest step.'; Time = '10 to 30 minutes';
+       Modes = @('Pc', 'Server'); Risk = 'Changes'; Requires = $null },
     @{ Id = 6; Name = 'Defender update + scan';          Title = 'Update virus definitions and scan';
-       Desc = 'Updates Windows Defender and runs a quick virus scan.'; Time = '2 to 10 minutes' },
+       Desc = 'Updates Windows Defender and runs a quick virus scan.'; Time = '2 to 10 minutes';
+       Modes = @('Pc', 'Server'); Risk = 'Changes';
+       Requires = {
+           if (-not (Get-Command Update-MpSignature -ErrorAction SilentlyContinue) -or -not (Get-Service WinDefend -ErrorAction SilentlyContinue)) {
+               return 'Windows Defender is not installed.'
+           }
+           try {
+               if ([string](Get-MpComputerStatus -ErrorAction Stop).AMRunningMode -like '*Passive*') {
+                   return 'Windows Defender is in passive mode because another antivirus is active.'
+               }
+           } catch { }
+       } },
     @{ Id = 7; Name = 'Optimize drives (TRIM/defrag)';   Title = 'Optimize my drives';
-       Desc = 'Keeps SSDs fast (TRIM) and tidies hard disks (defrag). Windows picks the right method for every drive.'; Time = '1 to 30 minutes' },
+       Desc = 'Keeps SSDs fast (TRIM) and tidies hard disks (defrag). Windows picks the right method for every drive.'; Time = '1 to 30 minutes';
+       Modes = @('Pc', 'Server'); Risk = 'Changes';
+       Requires = { if (-not (Get-Command Optimize-Volume -ErrorAction SilentlyContinue)) { 'Optimize-Volume is not available on this PC.' } } },
     @{ Id = 8; Name = 'Disk health report';              Title = 'Check the health of my disks';
-       Desc = 'Shows whether your drives report any problems and how much space is left.'; Time = 'under 1 minute' }
+       Desc = 'Shows whether your drives report any problems and how much space is left.'; Time = 'under 1 minute';
+       Modes = @('Pc', 'Server'); Risk = 'ReadOnly';
+       Requires = { if (-not (Get-Command Get-PhysicalDisk -ErrorAction SilentlyContinue)) { 'Get-PhysicalDisk is not available on this PC.' } } }
 )
+
+# What are we running on? Product type 1 = workstation, 2/3 = domain controller/server.
+# InstallationType (registry) is Client, Server or "Server Core" (no desktop).
+function Get-SystemInfo {
+    $r = @{ ProductType = 1; InstallType = 'Client'; Text = 'Windows (version unknown)' }
+    try {
+        $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+        $cv = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction Stop
+        $r.ProductType = [int]$os.ProductType
+        if ($cv.InstallationType) { $r.InstallType = [string]$cv.InstallationType }
+        $build = [string]$os.BuildNumber
+        if ($null -ne $cv.UBR) { $build += ".$($cv.UBR)" }
+        $r.Text = "{0}, build {1}, edition {2}, install type {3}" -f ([string]$os.Caption).Trim(), $build, $cv.EditionID, $r.InstallType
+    } catch { }
+    return $r
+}
+
+$SystemInfo = Get-SystemInfo
+if ($Mode -ne 'Auto')                  { $RunMode = $Mode }
+elseif ($SystemInfo.ProductType -eq 1) { $RunMode = 'Pc' }
+else                                   { $RunMode = 'Server' }
+
+# Steps this mode offers, and the ones this PC cannot run (id -> reason).
+$ModeStepIds = @($StepInfo | Where-Object { $_.Modes -contains $RunMode } | ForEach-Object { [int]$_.Id })
+$Unavailable = @{}
+foreach ($si in $StepInfo) {
+    if ($ModeStepIds -notcontains [int]$si.Id -or -not $si.Requires) { continue }
+    $why = $null
+    try { $why = & $si.Requires } catch { }   # a broken check must not block the step
+    if ($why) { $Unavailable[[int]$si.Id] = [string]$why }
+}
+
+# Server Core has no desktop, so the window cannot open there.
+if (-not $headless -and $SystemInfo.InstallType -eq 'Server Core') {
+    Write-Host "This is Windows Server Core (no desktop), so the window cannot open. Run with -All or -Steps instead." -ForegroundColor Red
+    Start-Sleep -Seconds 5
+    exit 2
+}
 
 # Turns marker lines from the engine into readable text (for the log).
 function Format-MarkerText([string[]]$P) {
@@ -172,7 +244,7 @@ function Resolve-StepSelection([string]$Text, [int]$Max) {
 #  lines starting with "@@" are progress markers:
 #     @@STEP|<id>|START|<name>
 #     @@STEP|<id>|END|<OK/Failed/Skipped>|<seconds>|<message>
-#     @@DONE|<GB freed>|<time>|<failed steps>|<reboot pending>|<stopped>|<aborted>
+#     @@DONE|<GB freed>|<time>|<failed steps>|<reboot pending>|<stopped>|<aborted>|<unavailable steps>
 # =============================================================================
 $Engine = {
     param($Opt)
@@ -183,6 +255,7 @@ $Engine = {
         Aborted   = $false
         Cancelled = $false
         PowerOk   = $true
+        Unavail   = 0
         Results   = New-Object System.Collections.Generic.List[object]
     }
 
@@ -214,6 +287,7 @@ $Engine = {
             Status   = $Status
             Duration = $Duration
             Message  = $Message
+            Os       = $Opt.SystemText
         })
     }
 
@@ -255,6 +329,14 @@ $Engine = {
 
         if (@($Opt.Steps) -notcontains $Id) {
             Add-Result $Name 'Skipped' '00:00:00' 'Not selected'
+            return
+        }
+        if ($Opt.Unavailable -and $Opt.Unavailable.ContainsKey($Id)) {
+            $why = [string]$Opt.Unavailable[$Id]
+            $State.Unavail++
+            Say "Step $Id skipped: $why"
+            Add-Result $Name 'Skipped' '00:00:00' $why
+            Say "@@STEP|$Id|END|Skipped|0|$(Clean-Msg $why)"
             return
         }
         if (-not $State.Cancelled -and $Opt.CancelFile -and (Test-Path -LiteralPath $Opt.CancelFile)) {
@@ -301,6 +383,7 @@ $Engine = {
     }
 
     $freeBefore = Get-FreeSpaceGB
+    Say ("System: {0} (mode: {1})" -f $Opt.SystemText, $Opt.Mode)
     Say ("Selected steps: {0}" -f (@($Opt.Steps) -join ', '))
 
     # ---------------------------------------------------- 1. Restore point
@@ -624,6 +707,13 @@ public static extern int SRRemoveRestorePoint(int dwRPNum);
 
     try {
         New-Item -ItemType Directory -Path (Split-Path $Opt.HistoryFile) -Force | Out-Null
+        # The CSV gained an "Os" column: keep an older file aside so the columns stay aligned.
+        if (Test-Path -LiteralPath $Opt.HistoryFile) {
+            $header = Get-Content -LiteralPath $Opt.HistoryFile -TotalCount 1
+            if ($header -notmatch '"Os"') {
+                Move-Item -LiteralPath $Opt.HistoryFile -Destination ($Opt.HistoryFile -replace '\.csv$', '_before-os-column.csv') -Force
+            }
+        }
         $State.Results | Export-Csv -Path $Opt.HistoryFile -Append -NoTypeInformation -Encoding UTF8
     } catch {
         Say "WARNING: could not write the history file: $($_.Exception.Message)"
@@ -642,7 +732,7 @@ public static extern int SRRemoveRestorePoint(int dwRPNum);
     $failedCount   = @($State.Results | Where-Object { $_.Status -eq 'Failed' }).Count
     $rebootPending = [bool]((Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') -or
                             (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired'))
-    Say ("@@DONE|{0:N2}|{1}|{2}|{3}|{4}|{5}" -f $freed, $elapsedText, $failedCount, $rebootPending, $State.Cancelled, $State.Aborted)
+    Say ("@@DONE|{0:N2}|{1}|{2}|{3}|{4}|{5}|{6}" -f $freed, $elapsedText, $failedCount, $rebootPending, $State.Cancelled, $State.Aborted, $State.Unavail)
 }
 
 # =============================================================================
@@ -675,12 +765,16 @@ if ($headless) {
         if (-not $selected) {
             Write-Host "Invalid -Steps value '$Steps'. Use numbers 1-$maxStep, e.g. -Steps `"1,3,5-6`"." -ForegroundColor Red
             Start-Sleep -Seconds 5
-            exit 1
+            exit 2
         }
     } else {
-        $selected = @(1..$maxStep)
+        $selected = $ModeStepIds
     }
-    $selected = @($selected | Where-Object { $skipped -notcontains $_ })
+    $notInMode = @($selected | Where-Object { $ModeStepIds -notcontains $_ })
+    if ($notInMode.Count -gt 0) {
+        Write-Host "Ignoring step(s) $($notInMode -join ', '): not available in $RunMode mode." -ForegroundColor Yellow
+    }
+    $selected = @($selected | Where-Object { $ModeStepIds -contains $_ -and $skipped -notcontains $_ })
     if ($selected.Count -eq 0) {
         Write-Host "Nothing to do." -ForegroundColor Yellow
         exit
@@ -701,6 +795,9 @@ if ($headless) {
         IgnorePower       = [bool]$IgnorePower
         HistoryFile       = $HistoryFile
         CancelFile        = $CancelFile
+        Mode              = $RunMode
+        SystemText        = $SystemInfo.Text
+        Unavailable       = $Unavailable
     }
 
     $logFile = Open-RunLog
@@ -731,12 +828,18 @@ if ($headless) {
         Close-RunLog
     }
 
-    $exitCode = 0
+    # 0 = fine, 1 = warnings (stopped, or steps this PC cannot run), 2 = failures
+    $exitCode = 2
+    $finished = $false
     if ($script:DoneInfo) {
-        if ($script:DoneInfo[6] -eq 'True') { $exitCode = 1 }
-        if ($script:DoneInfo[4] -eq 'True') { Write-Host "A reboot is pending." -ForegroundColor Yellow }
+        $d = $script:DoneInfo
+        $finished = ($d[5] -ne 'True' -and $d[6] -ne 'True')
+        if ([int]$d[3] -gt 0 -or $d[6] -eq 'True') { $exitCode = 2 }
+        elseif ($d[5] -eq 'True' -or [int]$d[7] -gt 0) { $exitCode = 1 }
+        else { $exitCode = 0 }
+        if ($d[4] -eq 'True') { Write-Host "A reboot is pending." -ForegroundColor Yellow }
     }
-    if ($Reboot -and $exitCode -eq 0) {
+    if ($Reboot -and $finished) {
         Write-Host "Restarting in 30 seconds (run 'shutdown /a' to cancel)..."
         & shutdown.exe /r /t 30 /c "PC Maintenance finished - restarting"
     }
@@ -857,7 +960,7 @@ try {
 
         $chk = New-Object System.Windows.Forms.CheckBox
         $chk.AutoSize = $true
-        $chk.Checked  = $true
+        $chk.Checked  = ($script:RunMode -eq 'Pc' -or $Info.Risk -eq 'ReadOnly')   # on a server only read-only steps start ticked
         $chk.Font     = $script:FontBold
         $chk.Text     = ("{0}.  {1}" -f $Info.Id, $Info.Title)
         $chk.Margin   = New-Object System.Windows.Forms.Padding(0)
@@ -871,6 +974,18 @@ try {
         $desc.Margin      = New-Object System.Windows.Forms.Padding(22, 2, 0, 0)
         $desc.Text        = ("{0}  Takes {1}." -f $Info.Desc, $Info.Time)
         $card.Controls.Add($desc)
+
+        $why = $script:Unavailable[$id]
+        if ($why) {
+            $lblWhy = New-Object System.Windows.Forms.Label
+            $lblWhy.AutoSize    = $true
+            $lblWhy.MaximumSize = New-Object System.Drawing.Size(700, 0)
+            $lblWhy.Font        = $script:FontSmall
+            $lblWhy.ForeColor   = $script:ColAmber
+            $lblWhy.Margin      = New-Object System.Windows.Forms.Padding(22, 2, 0, 0)
+            $lblWhy.Text        = "Not available: $why"
+            $card.Controls.Add($lblWhy)
+        }
 
         $optPanel = $null
         $combos   = @()
@@ -909,6 +1024,11 @@ try {
 
         $script:StepCtl[$id] = @{ Check = $chk; Options = $optPanel; Combos = $combos }
         $chk.Tag = @{ Options = $optPanel }
+        if ($why) {
+            $chk.Checked = $false
+            $chk.Enabled = $false
+            if ($optPanel) { $optPanel.Enabled = $false }
+        }
         $chk.Add_CheckedChanged({
             param($sender, $e)
             if ($sender.Tag.Options) { $sender.Tag.Options.Enabled = $sender.Checked }
@@ -918,7 +1038,7 @@ try {
 
     # Reads the window and builds the settings for the engine
     function Get-RunOptions {
-        $ids = @($script:StepCtl.Keys | Where-Object { $script:StepCtl[$_].Check.Checked } |
+        $ids = @($script:StepCtl.Keys | Where-Object { $script:StepCtl[$_].Check.Checked -and $script:StepCtl[$_].Check.Enabled } |
                  Sort-Object | ForEach-Object { [int]$_ })
         $o = @{
             Steps             = [int[]]$ids
@@ -935,6 +1055,9 @@ try {
             Reboot            = $false
             HistoryFile       = $HistoryFile
             CancelFile        = $CancelFile
+            Mode              = $RunMode
+            SystemText        = $SystemInfo.Text
+            Unavailable       = $Unavailable
         }
         # Dropdown choices only count while "Show advanced options" is ticked
         if ($script:UI.chkAdv.Checked) {
@@ -1167,6 +1290,14 @@ try {
     $lblSub.Margin      = New-Object System.Windows.Forms.Padding(0, 2, 0, 0)
     $pnlHead.Controls.Add($lblHead)
     $pnlHead.Controls.Add($lblSub)
+    $lblMode = New-Object System.Windows.Forms.Label
+    $lblMode.Text        = "Mode: $RunMode   |   $($SystemInfo.Text)"
+    $lblMode.Font        = $script:FontSmall
+    $lblMode.ForeColor   = $script:ColMuted
+    $lblMode.AutoSize    = $true
+    $lblMode.MaximumSize = New-Object System.Drawing.Size(770, 0)
+    $lblMode.Margin      = New-Object System.Windows.Forms.Padding(0, 4, 0, 0)
+    $pnlHead.Controls.Add($lblMode)
     $pnlSetup.Controls.Add($pnlHead, 0, 0)
 
     # quick-select buttons
@@ -1189,7 +1320,9 @@ try {
         $btn.Add_Click({
             param($sender, $e)
             foreach ($sid in $script:StepCtl.Keys) {
-                $script:StepCtl[$sid].Check.Checked = (@($sender.Tag) -notcontains [int]$sid)
+                if ($script:StepCtl[$sid].Check.Enabled) {
+                    $script:StepCtl[$sid].Check.Checked = (@($sender.Tag) -notcontains [int]$sid)
+                }
             }
         })
         $pnlPre.Controls.Add($btn)
@@ -1203,7 +1336,9 @@ try {
     $flow.WrapContents  = $false
     $flow.AutoScroll    = $true
     $flow.Padding       = New-Object System.Windows.Forms.Padding(0, 4, 0, 4)
-    foreach ($si in $StepInfo) { $flow.Controls.Add((New-StepCard $si)) }
+    foreach ($si in $StepInfo) {
+        if ($ModeStepIds -contains [int]$si.Id) { $flow.Controls.Add((New-StepCard $si)) }
+    }
     $pnlSetup.Controls.Add($flow, 0, 2)
 
     # global advanced options
@@ -1290,7 +1425,7 @@ try {
     $pnlSetup.Controls.Add($tlpFoot, 0, 4)
 
     $btnStart.Add_Click({
-        $ids = @($script:StepCtl.Keys | Where-Object { $script:StepCtl[$_].Check.Checked })
+        $ids = @($script:StepCtl.Keys | Where-Object { $script:StepCtl[$_].Check.Checked -and $script:StepCtl[$_].Check.Enabled })
         if ($ids.Count -eq 0) {
             [void](Show-Message 'Please tick at least one step first.' 'Nothing selected' ([System.Windows.Forms.MessageBoxButtons]::OK) ([System.Windows.Forms.MessageBoxIcon]::Information))
             return
@@ -1301,9 +1436,9 @@ try {
             return
         }
         $note = "You are about to run $($ids.Count) step(s).`r`n`r`nBefore you continue:`r`n - save your work`r`n - keep the charger connected (laptops)"
-        $emptyBin = $script:StepCtl[4].Check.Checked -or $script:StepCtl[3].Check.Checked
+        $emptyBin = ($ids -contains 3) -or ($ids -contains 4)
         if ($emptyBin) {
-            $leave = $script:UI.chkAdv.Checked -and ($script:StepCtl[4].Combos[1].SelectedIndex -eq 1)
+            $leave = $script:UI.chkAdv.Checked -and $script:StepCtl.ContainsKey(4) -and ($script:StepCtl[4].Combos[1].SelectedIndex -eq 1)
             if (-not $leave) { $note += "`r`n - the Recycle Bin will be emptied for good" }
         }
         $answer = Show-Message $note 'Ready to start?' ([System.Windows.Forms.MessageBoxButtons]::OKCancel) ([System.Windows.Forms.MessageBoxIcon]::Information)

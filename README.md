@@ -229,6 +229,7 @@ A summary table of every step (status, duration, message), total time, space fre
 | `-SkipSFC` | Don't run step 5. |
 | `-SkipDefender` | Don't run step 6. |
 | `-Reboot` | Reboot automatically 30 seconds after finishing. Uses a forced restart, so save your work first. |
+| `-Mode Auto\|Pc\|Server` | Which steps to offer. `Auto` (default) picks `Server` on Windows Server and `Pc` otherwise. Steps that do not belong to the mode are hidden in the window and ignored on the command line. |
 
 The `-Skip...` switches also suppress the window (they run "everything except these").
 
@@ -253,7 +254,9 @@ Run-Maintenance.cmd -All
 Run-Maintenance.cmd -Steps "2,3"
 ```
 
-The script's exit code is `1` if it could not start (invalid `-Steps`, charger never connected) and `0` otherwise. **A failed step does not change the exit code**: check the summary or the history CSV for step results.
+Exit code of an unattended run: `0` everything fine, `1` warnings (stopped by the user, or a step skipped because this PC cannot run it, for example no winget), `2` a step failed, the charger never connected, or the run could not start (invalid `-Steps`).
+
+A step that this PC cannot run (missing tool, Defender in passive mode) is skipped with the reason in the log; in the window its checkbox is greyed out with the reason shown. On Windows Server Core there is no desktop, so the window does not open: use `-All` or `-Steps`.
 
 ---
 
@@ -330,6 +333,9 @@ Everything is written to:
 | `Status` | `OK`, `Failed` or `Skipped` |
 | `Duration` | `hh:mm:ss` |
 | `Message` | Error text for failed steps, or `Not selected` / reason for skipped steps |
+| `Os` | Windows name, build, edition and install type (Client / Server / Server Core) |
+
+The first lines of every transcript also show this system line. A history file from an older version (without `Os`) is renamed to `MaintenanceHistory_before-os-column.csv` the first time the new version runs.
 
 Transcripts older than **90 days** are deleted automatically. The CSV is never trimmed.
 
@@ -477,7 +483,6 @@ Yes: edit the `$exclude` list at the top of step 3 in the script (wildcards allo
 - "Stop after this step" cannot interrupt a step that is already running.
 - winget can only update what is in its repositories; software not listed there is skipped.
 - Temp cleanup skips files in use; some may remain until the next run.
-- The exit code does not reflect failed steps (see the CSV).
 - Defragmenting large hard disks can take hours.
 
 ---
