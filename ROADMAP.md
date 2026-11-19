@@ -1,6 +1,6 @@
 # Roadmap
 
-Phase 1 is written but unexecuted (no PowerShell in the sandbox); phases 2 and 3 are not started. Sizes: S / M / L. Marked with a star = suggested first.
+Phases 1 and 2 are written but unexecuted (no PowerShell in the sandbox); phase 3 is not started. The step ids 1-14 are stable: new steps get new ids. Sizes: S / M / L. Marked with a star = suggested first.
 
 ## Phase 1: foundation (do this first, it unlocks the rest)
 
@@ -13,29 +13,30 @@ Phase 1 is written but unexecuted (no PowerShell in the sandbox); phases 2 and 3
 ## Phase 2: PC features
 
 Safer / clearer
-- [ ] Preview before deleting: what each cleanup would remove and how much space it frees (M, star)
-- [ ] winget update list with checkboxes; pin or skip packages (M, star)
-- [ ] Built-in scheduler button: create the scheduled task (weekly, on AC power, run-if-missed) (S, star)
-- [ ] Presets: Quick tune-up / Deep clean / Weekly safe; remember last settings (S)
-- [ ] Before/after HTML report plus a history tab built from `MaintenanceHistory.csv` (M)
+- [x] Preview before deleting (M, star) *(window button and `-Preview`; covers steps 2, 4 and 10; cleanmgr cannot be previewed)*
+- [x] winget update list with checkboxes; pin or skip packages (M, star) *(pinning uses `winget pin`; the list parses winget's text table)*
+- [x] Built-in scheduler button (S, star) *(Schedule... dialog; runs a copy in Program Files)*
+- [x] Presets: Quick tune-up / Deep clean / Weekly safe; remember last settings (S)
+- [x] Before/after HTML report plus a history view (M) *(a History... window instead of a tab)*
 
 Updates
-- [ ] Windows Update scan/install via the built-in update COM API (`Microsoft.Update.Session`), with reboot reporting (M)
-- [ ] Store apps through winget; report (not install) driver updates (S)
+- [x] Windows Update scan/install via the built-in update COM API (M) *(step 9; scan only by default)*
+- [x] Store apps through winget; report (not install) driver updates (S) *(`winget upgrade --all` already covers msstore; drivers are reported in step 9)*
 
 Cleanup
-- [ ] "What is using my space": largest folders, hibernation/page file, `DISM /AnalyzeComponentStore`, old user profiles; report only (M, star)
-- [ ] More caches: Windows Update download cache, Delivery Optimization, browser caches (never passwords/logins) (M)
-- [ ] Startup manager: run keys, startup folders, scheduled tasks, enable/disable (M)
+- [x] "What is using my space" (M, star) *(step 11)*
+- [x] More caches (M) *(step 10, off by default)*
+- [x] Startup manager (M) *(Tools window; uses StartupApproved, deletes nothing)*
 
 Health and fixes
-- [ ] "Why did my PC crash": summary of BSODs, app crashes, disk errors from the last 30 days (M, star)
-- [ ] Hardware health: SSD wear/temperature/error counters, battery report, online disk scan, schedule memory test (S to M)
-- [ ] One-click repairs: network reset, Windows Update component reset, search index/icon cache rebuild, print spooler restart (S each)
-- [ ] Security check-up (read-only): Defender definitions, firewall, BitLocker, Secure Boot/TPM, pending updates, SMBv1/RDP (M)
+- [x] "Why did my PC crash" (M, star) *(step 12)*
+- [x] Hardware health (S to M) *(step 13; memory test is a button in Tools)*
+- [x] One-click repairs (S each) *(Tools window)*
+- [x] Security check-up (M) *(step 14; pending updates are in step 9)*
 
 Polish
-- [ ] Dutch/English toggle, dark mode, proper high-DPI scaling, finished-run notification, GitHub release check (notify only)
+- [x] Dutch/English toggle, dark mode, high-DPI scaling, finished-run notification
+- [ ] GitHub release check (notify only): **not built**, it needs a network call outside the allowed list (winget, DISM, Defender); the owner has to allow that first
 
 ## Phase 3: Server mode (same exe)
 

@@ -8,7 +8,7 @@ Background and past decisions: `HISTORY.md`. Planned work: `ROADMAP.md`. User do
 
 | File | Role |
 |---|---|
-| `Run-Maintenance.ps1` | The whole program: engine + unattended mode + window (~1470 lines) |
+| `Run-Maintenance.ps1` | The whole program: engine + unattended mode + window (~3100 lines) |
 | `Run-Maintenance.cmd` | Double-click launcher for the .ps1 (execution-policy bypass, this run only) |
 | `Launcher.cs` | Exe launcher. Embeds the .ps1 as a resource, runs it with powershell.exe |
 | `app.manifest` | `requireAdministrator` for the exe |
@@ -32,17 +32,29 @@ Background and past decisions: `HISTORY.md`. Planned work: `ROADMAP.md`. User do
 3. **`$Engine = { param($Opt) ... }`**: a scriptblock holding all the work. It talks only through output lines:
    - normal line = log text
    - `@@STEP|<id>|START|<name>` and `@@STEP|<id>|END|<OK/Failed/Skipped>|<sec>|<msg>`
-   - `@@DONE|<GB freed>|<time>|<failed count>|<reboot pending>|<stopped>|<aborted>|<unavailable count>`
+   - `@@DONE|<GB freed>|<time>|<failed count>|<reboot pending>|<stopped>|<aborted>|<unavailable count>|<report file>`
 4. **Unattended mode** (`-All`, `-Steps`, `-Skip*`): runs `& $Engine $runOpt` in the console and writes the log.
 5. **Window**: builds WinForms; `Start-Run` runs the engine in a **background runspace** (`$Engine.ToString()` passed to `AddScript`, options hashtable as the argument). A 300 ms timer (`Poll-Run`) reads the output collection and updates the UI.
 
 Because the engine runs in its own runspace, it cannot see script-level variables. Everything it needs comes through `$Opt`, and its helper functions are defined inside the block.
 
 ### `$Opt` keys
-`Steps` (int[]), `StepNames`, `KeepRestorePoints`, `WingetSilent`, `CleanStrength` (Standard/Gentle), `TempDays`, `EmptyRecycleBin`, `RepairMode` (Both/SfcOnly/DismOnly), `DefenderMode` (Quick/UpdateOnly/Full), `OptimizeDrive` (All or a letter), `IgnorePower`, `HistoryFile`, `CancelFile`, `Mode`, `SystemText`, `Unavailable` (hashtable id -> reason). The window also has `Reboot`.
+`Steps` (int[]), `StepNames`, `KeepRestorePoints`, `WingetSilent`, `CleanStrength` (Standard/Gentle), `TempDays`, `EmptyRecycleBin`, `RepairMode` (Both/SfcOnly/DismOnly), `DefenderMode` (Quick/UpdateOnly/Full), `OptimizeDrive` (All or a letter), `IgnorePower`, `HistoryFile`, `CancelFile`, `Mode`, `SystemText`, `Unavailable` (hashtable id -> reason), `Preview`, `WingetIds`, `WindowsUpdateMode` (Scan/Install), `CacheWindowsUpdate`, `CacheDeliveryOpt`, `CacheBrowsers`, `DiskScan`, `ReportFile`. The window also has `Reboot`.
+
+### Phase 2 additions (see ROADMAP.md)
+- Steps 9-14 (Windows Update COM, extra caches, space report, crash summary, hardware health, security check-up). Step 10 has `DefaultOn = $false`: not ticked, not in `-All`/`$ModeDefaultIds`.
+- `New-RunOptions` is the one place with engine option defaults; the window (`Get-RunOptions`) and unattended mode both start from it. Add new `$Opt` keys there.
+- `$Presets` (QuickTuneUp / DeepClean / WeeklySafe) drive the window buttons and `-Preset`.
+- Preview mode (`$Opt.Preview`, `-Preview`): only steps 2, 4, 10; engine steps must not change anything when it is set; no CSV row, no report, no power wait.
+- Engine helpers `Get-TempContents` / `Remove-Scanned` are shared by steps 4 and 10. `Write-HtmlReport` builds the report from `$State.Results` and `$State.StepLog` (the lines each step printed).
+- The window code is rebuilt in a `do { } while ($script:Restart)` loop (language/theme buttons). Event handlers cannot see function-local variables, so dialogs keep their controls in `$script:Dlg`; do not use `GetNewClosure()`.
+- `T 'English text'` translates through `$script:NL` (Dutch). New window strings need a dictionary entry; the .ps1 must stay ASCII, so accented letters are written as `[char]0xEF` style expressions. Logs/engine output stay English.
+- Sizes in the window go through `S`/`Sz`/`Pd` (DPI scale). Settings live in `%APPDATA%\PCMaintenance\settings.json`.
+- Decided against: the roadmap's "GitHub release check" (a network call outside the allowed list). Needs the owner's OK first.
+- Checking the .ps1 without PowerShell: `pip install tree-sitter tree-sitter-language-pack` then parse with the `powershell` grammar; the only expected ERROR nodes are the `1GB`/`1MB`/`1KB` numeric suffixes. It checks syntax only, not behavior.
 
 ### Adding a step
-Add an entry to `$StepInfo` (set `Modes`, `Risk`, `Requires`), an `Invoke-Step -Id N -Name $Opt.StepNames[N-1]` block in the engine, any dropdown to `$script:StepOptions`, a line in README. Everything printed inside the block must go through `Say`.
+Add an entry to `$StepInfo` (set `Modes`, `Risk`, `Requires`, optionally `DefaultOn`), an `Invoke-Step -Id N -Name $Opt.StepNames[N-1]` block in the engine, any dropdown to `$script:StepOptions`, a line in README. Everything printed inside the block must go through `Say`.
 
 ## Safety rules (decided by the owner, keep them)
 

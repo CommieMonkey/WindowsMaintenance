@@ -35,3 +35,6 @@ See ROADMAP.md, Phase 3.
 
 ## Verification status
 Nothing has been executed by the assistant: no PowerShell in its sandbox. The owner ran the exe on a real Windows PC and reported it works. Server editions: untested.
+
+## Phase 2 (built in a Claude Code session, Nov 2026)
+Built all of ROADMAP.md phase 2 except the GitHub release check (it needs a network call outside the allowed list). New steps 9-14, presets, preview, remembered settings, winget chooser with pinning, scheduler dialog, HTML report and history window, Tools window (repairs + startup manager), Dutch/English, dark mode, DPI scaling, finished notification. Nothing was executed: no PowerShell in that sandbox. The script was only parsed with a tree-sitter PowerShell grammar (syntax only). Expect a first real run on Windows to find bugs; the riskiest parts are the winget table parsing, the scheduled task settings, the DPI layout and the Dutch/dark-theme rebuild loop.
