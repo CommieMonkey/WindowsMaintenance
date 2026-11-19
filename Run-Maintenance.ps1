@@ -352,6 +352,7 @@ $Engine = {
         if ($s.Trim() -eq '') { return $null }
         if ($s -match '^[\s\-\\|/]+$') { return $null }
         if ($s -match '[\u2580-\u259F]') { return $null }
+        if ($s -match '^\s*\[[=\s]*\d+(\.\d+)?%[=\s]*\]\s*$') { return $null }   # DISM progress bar
         if ($s -match '^\s*[\d\.,]+\s*[KMG]?B\s*/\s*[\d\.,]+\s*[KMG]?B\s*$') { return $null }
         return $s
     }
@@ -1010,10 +1011,10 @@ public static extern int SRRemoveRestorePoint(int dwRPNum);
             Format-Table -AutoSize | Out-String -Width 150 -Stream
 
         Say '--- Special files'
-        foreach ($n in 'hiberfil.sys', 'pagefile.sys', 'swapfile.sys') {
-            $f = Get-Item -LiteralPath "$drive\$n" -Force -ErrorAction SilentlyContinue
-            if ($f) { Say ("  {0,-14} {1}" -f $n, (Format-Bytes $f.Length)) }
-        }
+        $special = @(Get-ChildItem -LiteralPath "$drive\" -Force -File -ErrorAction SilentlyContinue |
+                     Where-Object { $_.Name -in 'hiberfil.sys', 'pagefile.sys', 'swapfile.sys' })
+        if ($special.Count -eq 0) { Say '  (none of hiberfil.sys, pagefile.sys, swapfile.sys found on the system drive)' }
+        foreach ($f in $special) { Say ("  {0,-14} {1}" -f $f.Name, (Format-Bytes $f.Length)) }
         Say '  (hiberfil.sys can be removed with "powercfg /h off" if you never use hibernate or fast startup)'
         if (Test-Path -LiteralPath "$drive\Windows.old") {
             Say ("  Windows.old    {0}  (removable with Disk Cleanup > Previous Windows installation)" -f (Format-Bytes (Get-FolderBytes "$drive\Windows.old")))
@@ -1081,7 +1082,7 @@ public static extern int SRRemoveRestorePoint(int dwRPNum);
         Say "Hardware error reports (WHEA): $($whea.Count)"
         Show-Events $whea 5
         if ($bug.Count + $power.Count + $disk.Count + $whea.Count -eq 0) { Say 'No serious problems found in the event log.' }
-        else { Say 'WARNING: see the lines above. Repeated disk or hardware errors deserve attention.' }
+        else { Say 'WARNING: see the lines above. Blue screens, unexpected shutdowns and disk or hardware errors deserve attention.' }
     }
 
     # ---------------------------------------------------- 13. Hardware health
