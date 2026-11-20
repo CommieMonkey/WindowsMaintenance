@@ -3033,7 +3033,16 @@ try {
         if ($flow) { $flow.SuspendLayout() }
         try {
             if ($script:UI.toolbar) {
-                $script:UI.toolbar.MaximumSize = New-Object System.Drawing.Size -ArgumentList ([math]::Max((S 300), $cw - (S 340))), 0
+                # A wrapping panel in an auto-sized column collapses to one column of buttons, so it gets
+                # a definite width: wide enough for one row when there is room, narrower (wrapping) when not.
+                $tw = [math]::Max((S 300), [math]::Min((S 640), $cw - (S 340)))
+                $script:UI.toolbar.MinimumSize = New-Object System.Drawing.Size -ArgumentList $tw, 0
+                $script:UI.toolbar.MaximumSize = New-Object System.Drawing.Size -ArgumentList $tw, 0
+                if ($script:UI.headTable) {
+                    $col = $script:UI.headTable.ColumnStyles[1]
+                    $col.SizeType = [System.Windows.Forms.SizeType]::Absolute
+                    $col.Width    = $tw + (S 6)
+                }
             }
             if ($script:UI.presetPanel) {
                 $script:UI.presetPanel.MaximumSize = New-Object System.Drawing.Size -ArgumentList $inner, 0
@@ -3614,6 +3623,7 @@ try {
         $tlpHead.AutoSize    = $true
         $tlpHead.Dock        = 'Fill'
         $tlpHead.Margin      = Pd 0 0 0 10
+        $script:UI.headTable = $tlpHead
         [void]$tlpHead.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 100)))
         [void]$tlpHead.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::AutoSize)))
         [void]$tlpHead.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
@@ -3631,6 +3641,7 @@ try {
         $pnlTools.FlowDirection = 'LeftToRight'
         $pnlTools.WrapContents  = $true
         $pnlTools.AutoSize      = $true
+        $pnlTools.AutoSizeMode  = 'GrowAndShrink'
         $pnlTools.Anchor        = 'Top, Right'
         $pnlTools.Margin        = Pd 0 6 0 0
         $script:UI.toolbar = $pnlTools
