@@ -112,6 +112,10 @@ Start the tool without parameters and this window opens (the black console windo
 
 **Choosing what to do**
 
+- The window can be **resized to any size** (and maximized); the steps, texts and buttons follow the width. It remembers its size, the language and the theme.
+- Steps are shown in four groups (*Protect and update*, *Clean up*, *Repair and optimize*, *Check and report*). The colored strip on the left of a step shows how much it does: green = report only, amber = changes the system, red = deletes files. The run order is still by step number.
+- The toolbar at the top right has **Preview cleanup**, **Tools...**, **Schedule...**, **History...**, the language switch and the theme switch.
+
 - Every step has a checkbox, a plain-language title, a short explanation and an estimate of how long it takes. Everything is ticked by default except step 10 (extra caches), which deletes and is opt-in.
 - Quick buttons at the top: **Select everything**, **Select nothing**, **Everything except the slow repair** and three presets: **Quick tune-up** (steps 4, 7, 8), **Deep clean** (1, 2, 3, 4, 5, 7, 8, 10) and **Weekly safe** (2, 6, 7, 8, 9, 14, nothing is deleted).
 - Step 2 has a **Choose which programs to update...** button: a list of programs with an update, with checkboxes. The option *Never update the programs I did not tick* uses `winget pin`, which `winget upgrade --all` respects. **Remove all pins** undoes it.
@@ -602,7 +606,7 @@ Yes: edit the `$exclude` list at the top of step 3 in the script (wildcards allo
 - The exe is a launcher around the script and must be rebuilt (`Build-Exe.cmd`) after script changes. It has not been tested on every Windows version.
 - **Server mode was written from the documentation and has not been run on a server yet.** Output formats that were assumed (for example `vssadmin`, `w32tm`, `dcdiag`) may differ on localized servers; the checks that parse text lines (VSS writers, time source) can then show an INFO line instead of a result.
 - The service check in step 15 can list services that are normally stopped; it ignores delayed-start services and a short list of known ones, not every case.
-- The window uses classic Windows Forms. It declares itself DPI aware and scales its layout, but that was not tested on high-DPI screens.
+- The window uses classic Windows Forms. It declares itself DPI aware and scales its layout, but that was not tested on high-DPI screens. The resizable layout (text wrapping, card widths) was written without being run; check it at a few window sizes.
 - The Dutch translation covers the window only; logs, reports and the text printed by the steps stay English. The translation was written without a native check.
 - The winget program list is read from `winget upgrade`'s text table, so it can break if a future winget changes that table.
 - The schedule dialog creates a task that runs while you are logged on (it needs your session, not a service account).

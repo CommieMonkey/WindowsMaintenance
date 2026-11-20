@@ -2058,6 +2058,13 @@ try {
                 Steps    = $ticked
                 Options  = $opts
             }
+            # window size in 96-dpi units (RestoreBounds is the normal size even while maximized)
+            try {
+                $rb = $script:UI.form.RestoreBounds
+                $data.Width     = [int]($rb.Width  / $script:Scale)
+                $data.Height    = [int]($rb.Height / $script:Scale)
+                $data.Maximized = [bool]($script:UI.form.WindowState -eq 'Maximized')
+            } catch { }
             New-Item -ItemType Directory -Path (Split-Path $script:SettingsFile) -Force | Out-Null
             ($data | ConvertTo-Json -Depth 4) | Set-Content -LiteralPath $script:SettingsFile -Encoding UTF8
         } catch { }
@@ -2090,6 +2097,15 @@ try {
     # ----- translations: English text -> Dutch. The log files stay English.
     #       (Dutch text here is ASCII only on purpose, see CLAUDE.md.)
     $script:NL = @{
+        'Changes the system' = 'Wijzigt het systeem'
+        'Check and report' = 'Controleren en rapporteren'
+        'Clean up' = 'Opschonen'
+        'Deletes files' = 'Verwijdert bestanden'
+        'Protect and update' = 'Beveiligen en bijwerken'
+        'Quick select:' = 'Snelle selectie:'
+        'Read-only' = 'Alleen lezen'
+        'Repair and optimize' = 'Herstellen en optimaliseren'
+        'Step {0}' = 'Stap {0}'
         '1 to 3 minutes' = '1 tot 3 minuten'
         '180 days' = '180 dagen'
         '365 days' = '365 dagen'
@@ -2360,40 +2376,59 @@ try {
     # ----- colors for the light and dark theme
     function Set-ThemeColors {
         if ($script:Theme -eq 'dark') {
-            $script:ColBack = Rgb 30 31 34;   $script:ColText  = Rgb 230 232 235; $script:ColMuted = Rgb 160 166 175
-            $script:ColCard = Rgb 44 46 51;   $script:ColInput = Rgb 55 58 64
+            $script:ColBack = Rgb 28 29 32;   $script:ColText  = Rgb 232 234 237; $script:ColMuted = Rgb 150 157 167
+            $script:ColCard = Rgb 40 42 47;   $script:ColInput = Rgb 52 55 61
+            $script:ColBorder = Rgb 68 72 80; $script:ColHover = Rgb 62 66 74
             $script:ColGreen = Rgb 90 200 120; $script:ColRed  = Rgb 240 110 110; $script:ColAmber = Rgb 240 170 70
-            $script:ColBlue = Rgb 110 170 255; $script:ColOnGreen = Rgb 20 20 20
+            $script:ColBlue = Rgb 110 170 255
+            $script:ColAccent = Rgb 96 165 250; $script:ColAccentHover = Rgb 135 190 255; $script:ColOnAccent = Rgb 12 18 28
         } else {
-            $script:ColBack = [System.Drawing.Color]::White; $script:ColText = Rgb 33 37 41; $script:ColMuted = Rgb 100 108 117
-            $script:ColCard = Rgb 243 246 250; $script:ColInput = [System.Drawing.Color]::White
-            $script:ColGreen = Rgb 30 140 60;  $script:ColRed = Rgb 200 40 40; $script:ColAmber = Rgb 200 120 0
-            $script:ColBlue = Rgb 0 100 200;   $script:ColOnGreen = [System.Drawing.Color]::White
+            $script:ColBack = [System.Drawing.Color]::White; $script:ColText = Rgb 32 36 42; $script:ColMuted = Rgb 98 106 116
+            $script:ColCard = Rgb 245 247 250; $script:ColInput = [System.Drawing.Color]::White
+            $script:ColBorder = Rgb 211 216 224; $script:ColHover = Rgb 230 235 242
+            $script:ColGreen = Rgb 28 134 58;  $script:ColRed = Rgb 196 40 40; $script:ColAmber = Rgb 190 112 0
+            $script:ColBlue = Rgb 0 95 184
+            $script:ColAccent = Rgb 0 95 184;  $script:ColAccentHover = Rgb 0 78 156; $script:ColOnAccent = [System.Drawing.Color]::White
         }
     }
 
-    # Controls that do not follow the form's colors by themselves (dark theme only)
+    # Gives buttons one flat look in both themes (Name 'primary' = accent button, 'ghost' = toolbar
+    # button without border), and the controls that ignore the form's colors their dark colors.
     function Apply-Theme($Ctl) {
-        if ($script:Theme -ne 'dark') { return }
         foreach ($c in $Ctl.Controls) {
             if ($c -is [System.Windows.Forms.Button]) {
-                if ($c.Name -ne 'primary') {
-                    $c.FlatStyle = 'Flat'
-                    $c.FlatAppearance.BorderColor = $script:ColMuted
+                $c.FlatStyle = 'Flat'
+                $c.Cursor    = [System.Windows.Forms.Cursors]::Hand
+                if ($c.Name -eq 'primary') {
+                    $c.FlatAppearance.BorderSize = 0
+                    $c.FlatAppearance.MouseOverBackColor = $script:ColAccentHover
+                    $c.BackColor = $script:ColAccent
+                    $c.ForeColor = $script:ColOnAccent
+                } elseif ($c.Name -eq 'ghost') {
+                    $c.FlatAppearance.BorderSize = 0
+                    $c.FlatAppearance.MouseOverBackColor = $script:ColHover
+                    $c.BackColor = $script:ColBack
+                    $c.ForeColor = $script:ColText
+                } else {
+                    $c.FlatAppearance.BorderSize = 1
+                    $c.FlatAppearance.BorderColor = $script:ColBorder
+                    $c.FlatAppearance.MouseOverBackColor = $script:ColHover
                     $c.BackColor = $script:ColInput
                     $c.ForeColor = $script:ColText
                 }
-            } elseif ($c -is [System.Windows.Forms.ComboBox]) {
-                $c.FlatStyle = 'Flat'; $c.BackColor = $script:ColInput; $c.ForeColor = $script:ColText
-            } elseif ($c -is [System.Windows.Forms.TextBox] -or $c -is [System.Windows.Forms.ListView]) {
-                $c.BackColor = $script:ColInput; $c.ForeColor = $script:ColText
-            } elseif ($c -is [System.Windows.Forms.DataGridView]) {
-                $c.BackgroundColor = $script:ColBack; $c.GridColor = $script:ColMuted
-                $c.EnableHeadersVisualStyles = $false
-                $c.ColumnHeadersDefaultCellStyle.BackColor = $script:ColCard
-                $c.ColumnHeadersDefaultCellStyle.ForeColor = $script:ColText
-                $c.DefaultCellStyle.BackColor = $script:ColInput
-                $c.DefaultCellStyle.ForeColor = $script:ColText
+            } elseif ($script:Theme -eq 'dark') {
+                if ($c -is [System.Windows.Forms.ComboBox]) {
+                    $c.FlatStyle = 'Flat'; $c.BackColor = $script:ColInput; $c.ForeColor = $script:ColText
+                } elseif ($c -is [System.Windows.Forms.TextBox] -or $c -is [System.Windows.Forms.ListView]) {
+                    $c.BackColor = $script:ColInput; $c.ForeColor = $script:ColText
+                } elseif ($c -is [System.Windows.Forms.DataGridView]) {
+                    $c.BackgroundColor = $script:ColBack; $c.GridColor = $script:ColBorder
+                    $c.EnableHeadersVisualStyles = $false
+                    $c.ColumnHeadersDefaultCellStyle.BackColor = $script:ColCard
+                    $c.ColumnHeadersDefaultCellStyle.ForeColor = $script:ColText
+                    $c.DefaultCellStyle.BackColor = $script:ColInput
+                    $c.DefaultCellStyle.ForeColor = $script:ColText
+                }
             }
             if ($c.Controls.Count -gt 0) { Apply-Theme $c }
         }
@@ -2974,49 +3009,155 @@ try {
         } catch { }
     }
 
+    # ----- layout that follows the window size
+    # Controls whose maximum width follows the window (labels that wrap, the toolbar...).
+    # Base 'form' = the width of the window, 'flow' = the width of the scrolling step list.
+    function Add-Wrap($Ctl, [string]$Base, [double]$Offset) {
+        [void]$script:WrapList.Add(@{ Ctl = $Ctl; Base = $Base; Offset = (S $Offset) })
+    }
+
+    function Update-Layout {
+        $f = $script:UI.form
+        if (-not $f -or $f.IsDisposed -or $script:InLayout) { return }
+        $cw = $f.ClientSize.Width
+        if ($cw -lt 100) { return }
+        $script:InLayout = $true      # setting sizes below can raise size events again
+        $inner = $cw - (S 40)
+        $flowW = $inner
+        $flow  = $script:UI.flow
+        if ($flow -and $flow.Width -ge (S 300)) {
+            # the outer width, so that the scrollbar appearing does not change the result
+            $flowW = [math]::Max((S 200), $flow.Width - [System.Windows.Forms.SystemInformation]::VerticalScrollBarWidth - (S 8))
+        }
+        $f.SuspendLayout()
+        if ($flow) { $flow.SuspendLayout() }
+        try {
+            if ($script:UI.toolbar) {
+                $script:UI.toolbar.MaximumSize = New-Object System.Drawing.Size -ArgumentList ([math]::Max((S 300), $cw - (S 340))), 0
+            }
+            if ($script:UI.presetPanel) {
+                $script:UI.presetPanel.MaximumSize = New-Object System.Drawing.Size -ArgumentList $inner, 0
+            }
+            foreach ($card in $script:CardList) {
+                $card.MinimumSize = New-Object System.Drawing.Size -ArgumentList $flowW, 0
+                $card.MaximumSize = New-Object System.Drawing.Size -ArgumentList $flowW, 0
+            }
+            foreach ($e in $script:WrapList) {
+                if ($e.Base -eq 'flow') { $base = $flowW } else { $base = $inner }
+                $e.Ctl.MaximumSize = New-Object System.Drawing.Size -ArgumentList ([math]::Max((S 120), $base - $e.Offset)), 0
+            }
+            $lv = $script:UI.lvSteps
+            if ($lv -and $lv.Columns.Count -ge 3 -and $lv.ClientSize.Width -gt (S 360)) {
+                $lv.Columns[0].Width = $lv.ClientSize.Width - (S 270)
+                $lv.Columns[1].Width = S 170
+                $lv.Columns[2].Width = S 90
+            }
+        } finally {
+            if ($flow) { $flow.ResumeLayout($true) }
+            $f.ResumeLayout($true)
+            $script:InLayout = $false
+        }
+    }
+
+    # The steps are shown in these groups (the run order is still by step number).
+    $script:StepGroup = @{
+        1 = 'Protect and update'; 2 = 'Protect and update'; 6 = 'Protect and update'; 9 = 'Protect and update'
+        3 = 'Clean up'; 4 = 'Clean up'; 10 = 'Clean up'; 19 = 'Clean up'
+        5 = 'Repair and optimize'; 7 = 'Repair and optimize'
+        8 = 'Check and report'; 11 = 'Check and report'; 12 = 'Check and report'; 13 = 'Check and report'; 14 = 'Check and report'
+        15 = 'Check and report'; 16 = 'Check and report'; 17 = 'Check and report'; 18 = 'Check and report'
+    }
+    $script:StepGroupOrder = @('Protect and update', 'Clean up', 'Repair and optimize', 'Check and report')
+
     # ----- the step cards
     function New-StepCard($Info) {
         $id = [int]$Info.Id
+        switch ([string]$Info.Risk) {
+            'ReadOnly' { $riskColor = $script:ColGreen; $riskText = T 'Read-only' }
+            'Deletes'  { $riskColor = $script:ColRed;   $riskText = T 'Deletes files' }
+            default    { $riskColor = $script:ColAmber; $riskText = T 'Changes the system' }
+        }
 
-        $card = New-Object System.Windows.Forms.FlowLayoutPanel
-        $card.FlowDirection = 'TopDown'
-        $card.WrapContents  = $false
-        $card.AutoSize      = $true
-        $card.AutoSizeMode  = 'GrowAndShrink'
-        $card.MinimumSize   = Sz 748 0
-        $card.MaximumSize   = Sz 748 0
-        $card.Margin        = Pd 0 0 0 8
-        $card.Padding       = Pd 10 8 10 8
-        $card.BackColor     = $script:ColCard
+        # a card = colored strip on the left (the risk) + the content
+        $card = New-Object System.Windows.Forms.TableLayoutPanel
+        $card.ColumnCount = 2
+        $card.RowCount    = 1
+        [void]$card.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Absolute, (S 4))))
+        [void]$card.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 100)))
+        [void]$card.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
+        $card.AutoSize     = $true
+        $card.AutoSizeMode = 'GrowAndShrink'
+        $card.Margin       = Pd 0 0 0 8
+        $card.Padding      = Pd 0 0 0 0
+        $card.BackColor    = $script:ColCard
+        [void]$script:CardList.Add($card)
+
+        $strip = New-Object System.Windows.Forms.Panel
+        $strip.Dock      = 'Fill'
+        $strip.Margin    = Pd 0 0 0 0
+        $strip.BackColor = $riskColor
+        $card.Controls.Add($strip, 0, 0)
+
+        $content = New-Object System.Windows.Forms.FlowLayoutPanel
+        $content.FlowDirection = 'TopDown'
+        $content.WrapContents  = $false
+        $content.AutoSize      = $true
+        $content.AutoSizeMode  = 'GrowAndShrink'
+        $content.Dock          = 'Fill'
+        $content.Margin        = Pd 0 0 0 0
+        $content.Padding       = Pd 12 9 12 9
+        $card.Controls.Add($content, 1, 0)
 
         $chk = New-Object System.Windows.Forms.CheckBox
         $chk.AutoSize = $true
         # on a server only read-only steps start ticked; the Deletes step "extra caches" is always opt-in
         $chk.Checked  = ($Info.DefaultOn -ne $false) -and ($script:RunMode -eq 'Pc' -or $Info.Risk -eq 'ReadOnly')
         $chk.Font     = $script:FontBold
-        $chk.Text     = ("{0}.  {1}" -f $Info.Id, (T $Info.Title))
+        $chk.Text     = (T $Info.Title)
         $chk.Margin   = Pd 0 0 0 0
-        $card.Controls.Add($chk)
+        $content.Controls.Add($chk)
 
         $desc = New-Object System.Windows.Forms.Label
         $desc.AutoSize    = $true
-        $desc.MaximumSize = Sz 700 0
         $desc.Font        = $script:FontSmall
         $desc.ForeColor   = $script:ColMuted
         $desc.Margin      = Pd 22 2 0 0
-        $desc.Text        = ("{0}  {1}" -f (T $Info.Desc), ((T 'Takes {0}.') -f (T $Info.Time)))
-        $card.Controls.Add($desc)
+        $desc.Text        = (T $Info.Desc)
+        $content.Controls.Add($desc)
+        Add-Wrap $desc 'flow' 62
+
+        # small facts under the description: step number, how long, how risky
+        $pnlFacts = New-Object System.Windows.Forms.FlowLayoutPanel
+        $pnlFacts.FlowDirection = 'LeftToRight'
+        $pnlFacts.WrapContents  = $true
+        $pnlFacts.AutoSize      = $true
+        $pnlFacts.Margin        = Pd 22 4 0 0
+        foreach ($f in @(
+            @{ Text = ((T 'Step {0}') -f $Info.Id); Color = $script:ColMuted; Font = $script:FontSmall },
+            @{ Text = (T $Info.Time);               Color = $script:ColMuted; Font = $script:FontSmall },
+            @{ Text = $riskText;                    Color = $riskColor;       Font = $script:FontSmallBold }
+        )) {
+            $fl = New-Object System.Windows.Forms.Label
+            $fl.AutoSize  = $true
+            $fl.Text      = $f.Text
+            $fl.ForeColor = $f.Color
+            $fl.Font      = $f.Font
+            $fl.Margin    = Pd 0 0 16 0
+            $pnlFacts.Controls.Add($fl)
+        }
+        $content.Controls.Add($pnlFacts)
+        Add-Wrap $pnlFacts 'flow' 62
 
         $why = $script:Unavailable[$id]
         if ($why) {
             $lblWhy = New-Object System.Windows.Forms.Label
             $lblWhy.AutoSize    = $true
-            $lblWhy.MaximumSize = Sz 700 0
-            $lblWhy.Font        = $script:FontSmall
+            $lblWhy.Font        = $script:FontSmallBold
             $lblWhy.ForeColor   = $script:ColAmber
-            $lblWhy.Margin      = Pd 22 2 0 0
+            $lblWhy.Margin      = Pd 22 4 0 0
             $lblWhy.Text        = ((T 'Not available: {0}') -f $why)
-            $card.Controls.Add($lblWhy)
+            $content.Controls.Add($lblWhy)
+            Add-Wrap $lblWhy 'flow' 62
         }
 
         # step 2: pick the programs to update
@@ -3026,11 +3167,11 @@ try {
             $pnlPick.FlowDirection = 'LeftToRight'
             $pnlPick.WrapContents  = $false
             $pnlPick.AutoSize      = $true
-            $pnlPick.Margin        = Pd 22 6 0 0
+            $pnlPick.Margin        = Pd 22 8 0 0
             $btnPick = New-Object System.Windows.Forms.Button
             $btnPick.Text     = (T 'Choose which programs to update...')
             $btnPick.AutoSize = $true
-            $btnPick.Padding  = Pd 6 2 6 2
+            $btnPick.Padding  = Pd 8 3 8 3
             $btnPick.Add_Click({ Show-WingetChooser })
             $lblSel = New-Object System.Windows.Forms.Label
             $lblSel.AutoSize  = $true
@@ -3040,7 +3181,7 @@ try {
             $script:UI.lblWingetSel = $lblSel
             $pnlPick.Controls.Add($btnPick)
             $pnlPick.Controls.Add($lblSel)
-            $card.Controls.Add($pnlPick)
+            $content.Controls.Add($pnlPick)
             Update-WingetLabel
         }
 
@@ -3053,8 +3194,7 @@ try {
             $optPanel.WrapContents  = $true
             $optPanel.AutoSize      = $true
             $optPanel.AutoSizeMode  = 'GrowAndShrink'
-            $optPanel.MaximumSize   = Sz 710 0
-            $optPanel.Margin        = Pd 22 6 0 0
+            $optPanel.Margin        = Pd 22 8 0 0
             $optPanel.Visible       = $false
 
             foreach ($d in $defs) {
@@ -3076,7 +3216,8 @@ try {
                 $optPanel.Controls.Add($combo)
                 $combos += $combo
             }
-            $card.Controls.Add($optPanel)
+            $content.Controls.Add($optPanel)
+            Add-Wrap $optPanel 'flow' 62
         }
 
         $script:StepCtl[$id] = @{ Check = $chk; Options = $optPanel; Combos = $combos }
@@ -3291,6 +3432,7 @@ try {
         $script:UI.btnReport.Visible  = $false
         $script:UI.pnlSetup.Visible   = $false
         $script:UI.pnlRun.Visible     = $true
+        Update-Layout
 
         # run the engine on a background thread so the window stays responsive
         $rs = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
@@ -3347,6 +3489,8 @@ try {
         $script:FontTitle  = New-Object System.Drawing.Font('Segoe UI Semibold', 20)
         $script:FontSmall  = New-Object System.Drawing.Font('Segoe UI', 9)
         $script:FontMono   = New-Object System.Drawing.Font('Consolas', 9)
+        $script:FontSmallBold = New-Object System.Drawing.Font('Segoe UI Semibold', 9)
+        $script:FontGroup  = New-Object System.Drawing.Font('Segoe UI Semibold', 9.5)
 
         # ----- dropdown settings per step (shown in "advanced options")
         $driveItems  = @('All drives (recommended)')
@@ -3424,24 +3568,38 @@ try {
         $script:UI         = @{}
 
         # ======================= build the window =======================
+        $script:WrapList = New-Object System.Collections.ArrayList
+        $script:CardList = New-Object System.Collections.ArrayList
+        $script:InLayout = $false
+
+        # size: the remembered one (or a default), never bigger than the screen
+        $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+        $startW = S 1000
+        $startH = S 780
+        $savedW = [double](Get-Setting 'Width' 0)
+        $savedH = [double](Get-Setting 'Height' 0)
+        if ($savedW -gt 0 -and $savedH -gt 0) { $startW = [int]($savedW * $script:Scale); $startH = [int]($savedH * $script:Scale) }
+        $startW = [math]::Max((S 760), [math]::Min($startW, $wa.Width))
+        $startH = [math]::Max((S 540), [math]::Min($startH, $wa.Height))
+
         $form = New-Object System.Windows.Forms.Form
         $form.Text            = 'PC Maintenance'
         $form.StartPosition   = 'CenterScreen'
-        $form.Size            = Sz 840 760
-        $form.MinimumSize     = Sz 840 560
-        # Fixed width, free height. (A height of 0 here can collapse the window to just a title bar.)
-        $form.MaximumSize     = Sz 840 4000
-        $form.MaximizeBox     = $false
+        $form.Size            = New-Object System.Drawing.Size -ArgumentList $startW, $startH
+        $form.MinimumSize     = Sz 760 540      # no maximum: the window can be any size
+        $form.MaximizeBox     = $true
         $form.Font            = $script:FontNormal
         $form.BackColor       = $script:ColBack
         $form.ForeColor       = $script:ColText
+        if ((Get-Setting 'Maximized' $false) -eq $true) { $form.WindowState = 'Maximized' }
+        $script:UI.form = $form
 
-        # ---------- setup view
+        # ---------- setup view: header, quick select, steps (scrolls), advanced options, footer
         $pnlSetup = New-Object System.Windows.Forms.TableLayoutPanel
         $pnlSetup.Dock        = 'Fill'
         $pnlSetup.ColumnCount = 1
         $pnlSetup.RowCount    = 5
-        $pnlSetup.Padding     = Pd 16 12 16 12
+        $pnlSetup.Padding     = Pd 20 14 20 12
         [void]$pnlSetup.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
         [void]$pnlSetup.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
         [void]$pnlSetup.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 100)))
@@ -3449,43 +3607,104 @@ try {
         [void]$pnlSetup.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
         $script:UI.pnlSetup = $pnlSetup
 
-        # header
-        $pnlHead = New-Object System.Windows.Forms.FlowLayoutPanel
-        $pnlHead.FlowDirection = 'TopDown'
-        $pnlHead.WrapContents  = $false
-        $pnlHead.AutoSize      = $true
-        $pnlHead.Margin        = Pd 0 0 0 6
+        # header: title and toolbar on one line, the explanation below
+        $tlpHead = New-Object System.Windows.Forms.TableLayoutPanel
+        $tlpHead.ColumnCount = 2
+        $tlpHead.RowCount    = 2
+        $tlpHead.AutoSize    = $true
+        $tlpHead.Dock        = 'Fill'
+        $tlpHead.Margin      = Pd 0 0 0 10
+        [void]$tlpHead.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 100)))
+        [void]$tlpHead.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::AutoSize)))
+        [void]$tlpHead.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
+        [void]$tlpHead.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
+
         $lblHead = New-Object System.Windows.Forms.Label
         $lblHead.Text     = 'PC Maintenance'
         $lblHead.Font     = $script:FontTitle
+        $lblHead.ForeColor = $script:ColText
         $lblHead.AutoSize = $true
-        $lblHead.Margin   = Pd 0 0 0 0
+        $lblHead.Margin   = Pd 0 0 12 0
+        $tlpHead.Controls.Add($lblHead, 0, 0)
+
+        $pnlTools = New-Object System.Windows.Forms.FlowLayoutPanel
+        $pnlTools.FlowDirection = 'LeftToRight'
+        $pnlTools.WrapContents  = $true
+        $pnlTools.AutoSize      = $true
+        $pnlTools.Anchor        = 'Top, Right'
+        $pnlTools.Margin        = Pd 0 6 0 0
+        $script:UI.toolbar = $pnlTools
+        $langText  = if ($script:Lang -eq 'nl') { 'English' } else { 'Nederlands' }
+        $themeText = if ($script:Theme -eq 'dark') { T 'Light mode' } else { T 'Dark mode' }
+        foreach ($u in @(
+            @{ Key = 'Preview';  Text = (T 'Preview cleanup') },
+            @{ Key = 'Tools';    Text = (T 'Tools...') },
+            @{ Key = 'Schedule'; Text = (T 'Schedule...') },
+            @{ Key = 'History';  Text = (T 'History...') },
+            @{ Key = 'Lang';     Text = $langText },
+            @{ Key = 'Theme';    Text = $themeText }
+        )) {
+            $ub = New-Object System.Windows.Forms.Button
+            $ub.Name = 'ghost'
+            $ub.Text = $u.Text; $ub.AutoSize = $true; $ub.Padding = Pd 8 3 8 3; $ub.Margin = Pd 0 0 2 2
+            $ub.Tag  = $u.Key
+            $ub.Add_Click({
+                param($sender, $e)
+                switch ($sender.Tag) {
+                    'Preview' {
+                        $ids = @($script:StepCtl.Keys | Where-Object { $script:StepCtl[$_].Check.Checked -and $script:StepCtl[$_].Check.Enabled -and ($PreviewIds -contains [int]$_) })
+                        if ($ids.Count -eq 0) {
+                            [void](Show-Message (T 'The preview works for steps 2, 4, 10 and 19. Tick at least one of them.') (T 'Preview cleanup') 'OK' 'Information')
+                        } else { Start-Run -Preview }
+                    }
+                    'Tools'    { Show-ToolsDialog }
+                    'Schedule' { Show-ScheduleDialog }
+                    'History'  { Show-HistoryDialog }
+                    'Lang'     { $script:Lang  = if ($script:Lang -eq 'nl') { 'en' } else { 'nl' }; Save-Settings; $script:Restart = $true; $form.Close() }
+                    'Theme'    { $script:Theme = if ($script:Theme -eq 'dark') { 'light' } else { 'dark' }; Save-Settings; $script:Restart = $true; $form.Close() }
+                }
+            })
+            $pnlTools.Controls.Add($ub)
+        }
+        $tlpHead.Controls.Add($pnlTools, 1, 0)
+
+        $pnlInfo = New-Object System.Windows.Forms.FlowLayoutPanel
+        $pnlInfo.FlowDirection = 'TopDown'
+        $pnlInfo.WrapContents  = $false
+        $pnlInfo.AutoSize      = $true
+        $pnlInfo.Margin        = Pd 0 2 0 0
+        $lblMode = New-Object System.Windows.Forms.Label
+        $lblMode.Text        = ((T 'Mode: {0}   |   {1}') -f $ModeLabel, $SystemInfo.Text)
+        $lblMode.Font        = $script:FontSmallBold
+        $lblMode.ForeColor   = $script:ColAccent
+        $lblMode.AutoSize    = $true
+        $lblMode.Margin      = Pd 0 0 0 2
+        Add-Wrap $lblMode 'form' 0
         $lblSub = New-Object System.Windows.Forms.Label
         $lblSub.Text        = (T 'Tick what you would like to do, then press "Start maintenance". If you are not sure, leave everything as it is - the default choices are safe.')
         $lblSub.Font        = $script:FontNormal
         $lblSub.ForeColor   = $script:ColMuted
         $lblSub.AutoSize    = $true
-        $lblSub.MaximumSize = Sz 770 0
-        $lblSub.Margin      = Pd 0 2 0 0
-        $lblMode = New-Object System.Windows.Forms.Label
-        $lblMode.Text        = ((T 'Mode: {0}   |   {1}') -f $ModeLabel, $SystemInfo.Text)
-        $lblMode.Font        = $script:FontSmall
-        $lblMode.ForeColor   = $script:ColMuted
-        $lblMode.AutoSize    = $true
-        $lblMode.MaximumSize = Sz 770 0
-        $lblMode.Margin      = Pd 0 4 0 0
-        $pnlHead.Controls.Add($lblHead)
-        $pnlHead.Controls.Add($lblSub)
-        $pnlHead.Controls.Add($lblMode)
-        $pnlSetup.Controls.Add($pnlHead, 0, 0)
+        $lblSub.Margin      = Pd 0 0 0 0
+        Add-Wrap $lblSub 'form' 0
+        $pnlInfo.Controls.Add($lblMode)
+        $pnlInfo.Controls.Add($lblSub)
+        $tlpHead.Controls.Add($pnlInfo, 0, 1)
+        $tlpHead.SetColumnSpan($pnlInfo, 2)
+        $pnlSetup.Controls.Add($tlpHead, 0, 0)
 
-        # quick-select buttons
+        # quick select
         $pnlPre = New-Object System.Windows.Forms.FlowLayoutPanel
         $pnlPre.FlowDirection = 'LeftToRight'
         $pnlPre.WrapContents  = $true
         $pnlPre.AutoSize      = $true
-        $pnlPre.MaximumSize   = Sz 790 0
-        $pnlPre.Margin        = Pd 0 4 0 6
+        $pnlPre.Margin        = Pd 0 0 0 8
+        $script:UI.presetPanel = $pnlPre
+        $lblQuick = New-Object System.Windows.Forms.Label
+        $lblQuick.Text = (T 'Quick select:'); $lblQuick.AutoSize = $true; $lblQuick.Font = $script:FontSmallBold
+        $lblQuick.ForeColor = $script:ColMuted
+        $lblQuick.Margin = Pd 0 7 10 0
+        $pnlPre.Controls.Add($lblQuick)
         if ($RunMode -eq 'Server') {
             $presetButtons = @(
                 @{ Text = 'Select everything'; Mode = 'Skip'; Ids = @() },
@@ -3506,7 +3725,7 @@ try {
             $btn = New-Object System.Windows.Forms.Button
             $btn.Text     = (T $b.Text)
             $btn.AutoSize = $true
-            $btn.Padding  = Pd 6 2 6 2
+            $btn.Padding  = Pd 8 3 8 3
             $btn.Margin   = Pd 0 0 8 4
             $btn.Tag      = @{ Mode = $b.Mode; Ids = @($b.Ids) }
             $btn.Add_Click({
@@ -3522,15 +3741,25 @@ try {
         }
         $pnlSetup.Controls.Add($pnlPre, 0, 1)
 
-        # the step cards
+        # the step cards, in groups, in a scrolling list that follows the window width
         $flow = New-Object System.Windows.Forms.FlowLayoutPanel
         $flow.Dock          = 'Fill'
         $flow.FlowDirection = 'TopDown'
         $flow.WrapContents  = $false
         $flow.AutoScroll    = $true
-        $flow.Padding       = Pd 0 4 0 4
-        foreach ($si in $StepInfo) {
-            if ($ModeStepIds -contains [int]$si.Id) { $flow.Controls.Add((New-StepCard $si)) }
+        $flow.Padding       = Pd 0 0 0 4
+        $script:UI.flow = $flow
+        foreach ($grp in $script:StepGroupOrder) {
+            $members = @($StepInfo | Where-Object { $ModeStepIds -contains [int]$_.Id -and $script:StepGroup[[int]$_.Id] -eq $grp })
+            if ($members.Count -eq 0) { continue }
+            $lblGrp = New-Object System.Windows.Forms.Label
+            $lblGrp.Text      = (T $grp).ToUpper()
+            $lblGrp.Font      = $script:FontGroup
+            $lblGrp.ForeColor = $script:ColMuted
+            $lblGrp.AutoSize  = $true
+            $lblGrp.Margin    = Pd 2 8 0 6
+            $flow.Controls.Add($lblGrp)
+            foreach ($si in $members) { $flow.Controls.Add((New-StepCard $si)) }
         }
         $pnlSetup.Controls.Add($flow, 0, 2)
 
@@ -3540,8 +3769,8 @@ try {
         $pnlGlobal.WrapContents  = $true
         $pnlGlobal.AutoSize      = $true
         $pnlGlobal.BackColor     = $script:ColCard
-        $pnlGlobal.Padding       = Pd 10 6 10 6
-        $pnlGlobal.Margin        = Pd 0 4 0 4
+        $pnlGlobal.Padding       = Pd 12 8 12 8
+        $pnlGlobal.Margin        = Pd 0 6 0 4
         $pnlGlobal.Visible       = $false
         $lblCh = New-Object System.Windows.Forms.Label
         $lblCh.Text = (T 'Charger check:'); $lblCh.AutoSize = $true; $lblCh.Font = $script:FontSmall
@@ -3566,67 +3795,36 @@ try {
         $script:UI.cmbFinish  = $cmbFinish
         $pnlSetup.Controls.Add($pnlGlobal, 0, 3)
 
-        # footer: power label, tools row, advanced toggle, buttons
+        # footer: a line, the power status and advanced toggle on the left, the buttons on the right
         $tlpFoot = New-Object System.Windows.Forms.TableLayoutPanel
         $tlpFoot.AutoSize    = $true
         $tlpFoot.Dock        = 'Fill'
         $tlpFoot.ColumnCount = 2
-        $tlpFoot.RowCount    = 3
+        $tlpFoot.RowCount    = 2
         [void]$tlpFoot.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 100)))
         [void]$tlpFoot.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::AutoSize)))
+        $sep = New-Object System.Windows.Forms.Panel
+        $sep.Height    = [math]::Max(1, (S 1))
+        $sep.Dock      = 'Fill'
+        $sep.BackColor = $script:ColBorder
+        $sep.Margin    = Pd 0 4 0 10
+        $tlpFoot.Controls.Add($sep, 0, 0)
+        $tlpFoot.SetColumnSpan($sep, 2)
+
+        $pnlFootLeft = New-Object System.Windows.Forms.FlowLayoutPanel
+        $pnlFootLeft.FlowDirection = 'TopDown'
+        $pnlFootLeft.WrapContents  = $false
+        $pnlFootLeft.AutoSize      = $true
+        $pnlFootLeft.Margin        = Pd 0 0 0 0
         $lblPower = New-Object System.Windows.Forms.Label
         $lblPower.AutoSize = $true
         $lblPower.Font     = $script:FontSmall
-        $lblPower.Margin   = Pd 0 4 0 4
+        $lblPower.Margin   = Pd 0 2 0 6
         $script:UI.lblPower = $lblPower
-        $tlpFoot.Controls.Add($lblPower, 0, 0)
-        $tlpFoot.SetColumnSpan($lblPower, 2)
-
-        # tools row
-        $pnlTools = New-Object System.Windows.Forms.FlowLayoutPanel
-        $pnlTools.FlowDirection = 'LeftToRight'
-        $pnlTools.WrapContents  = $true
-        $pnlTools.AutoSize      = $true
-        $pnlTools.MaximumSize   = Sz 790 0
-        $pnlTools.Margin        = Pd 0 0 0 4
-        $langText  = if ($script:Lang -eq 'nl') { 'English' } else { 'Nederlands' }
-        $themeText = if ($script:Theme -eq 'dark') { T 'Light mode' } else { T 'Dark mode' }
-        foreach ($u in @(
-            @{ Key = 'Preview';  Text = (T 'Preview cleanup') },
-            @{ Key = 'Tools';    Text = (T 'Tools...') },
-            @{ Key = 'Schedule'; Text = (T 'Schedule...') },
-            @{ Key = 'History';  Text = (T 'History...') },
-            @{ Key = 'Lang';     Text = $langText },
-            @{ Key = 'Theme';    Text = $themeText }
-        )) {
-            $ub = New-Object System.Windows.Forms.Button
-            $ub.Text = $u.Text; $ub.AutoSize = $true; $ub.Padding = Pd 6 2 6 2; $ub.Margin = Pd 0 0 8 4
-            $ub.Tag  = $u.Key
-            $ub.Add_Click({
-                param($sender, $e)
-                switch ($sender.Tag) {
-                    'Preview' {
-                        $ids = @($script:StepCtl.Keys | Where-Object { $script:StepCtl[$_].Check.Checked -and $script:StepCtl[$_].Check.Enabled -and ($PreviewIds -contains [int]$_) })
-                        if ($ids.Count -eq 0) {
-                            [void](Show-Message (T 'The preview works for steps 2, 4, 10 and 19. Tick at least one of them.') (T 'Preview cleanup') 'OK' 'Information')
-                        } else { Start-Run -Preview }
-                    }
-                    'Tools'    { Show-ToolsDialog }
-                    'Schedule' { Show-ScheduleDialog }
-                    'History'  { Show-HistoryDialog }
-                    'Lang'     { $script:Lang  = if ($script:Lang -eq 'nl') { 'en' } else { 'nl' }; Save-Settings; $script:Restart = $true; $form.Close() }
-                    'Theme'    { $script:Theme = if ($script:Theme -eq 'dark') { 'light' } else { 'dark' }; Save-Settings; $script:Restart = $true; $form.Close() }
-                }
-            })
-            $pnlTools.Controls.Add($ub)
-        }
-        $tlpFoot.Controls.Add($pnlTools, 0, 1)
-        $tlpFoot.SetColumnSpan($pnlTools, 2)
-
         $chkAdv = New-Object System.Windows.Forms.CheckBox
         $chkAdv.Text     = (T 'Show advanced options')
         $chkAdv.AutoSize = $true
-        $chkAdv.Margin   = Pd 0 14 0 0
+        $chkAdv.Margin   = Pd 0 0 0 0
         $script:UI.chkAdv = $chkAdv
         $chkAdv.Add_CheckedChanged({
             $show = $script:UI.chkAdv.Checked
@@ -3636,27 +3834,26 @@ try {
             }
             $script:UI.cmbCharger.Parent.Visible = $show
         })
-        $tlpFoot.Controls.Add($chkAdv, 0, 2)
+        $pnlFootLeft.Controls.Add($lblPower)
+        $pnlFootLeft.Controls.Add($chkAdv)
+        $tlpFoot.Controls.Add($pnlFootLeft, 0, 1)
 
         $pnlBtns = New-Object System.Windows.Forms.FlowLayoutPanel
         $pnlBtns.FlowDirection = 'RightToLeft'
         $pnlBtns.WrapContents  = $false
         $pnlBtns.AutoSize      = $true
+        $pnlBtns.Anchor        = 'Right'
         $btnClose0 = New-Object System.Windows.Forms.Button
-        $btnClose0.Text = (T 'Close'); $btnClose0.Size = Sz 90 44
+        $btnClose0.Text = (T 'Close'); $btnClose0.Size = Sz 100 44
         $btnClose0.Add_Click({ $form.Close() })
         $btnStart = New-Object System.Windows.Forms.Button
         $btnStart.Name = 'primary'
         $btnStart.Text = (T 'Start maintenance')
-        $btnStart.Size = Sz 210 44
+        $btnStart.Size = Sz 230 44
         $btnStart.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 12)
-        $btnStart.FlatStyle = 'Flat'
-        $btnStart.FlatAppearance.BorderSize = 0
-        $btnStart.BackColor = $script:ColGreen
-        $btnStart.ForeColor = $script:ColOnGreen
-        $pnlBtns.Controls.Add($btnClose0)
         $pnlBtns.Controls.Add($btnStart)
-        $tlpFoot.Controls.Add($pnlBtns, 1, 2)
+        $pnlBtns.Controls.Add($btnClose0)
+        $tlpFoot.Controls.Add($pnlBtns, 1, 1)
         $pnlSetup.Controls.Add($tlpFoot, 0, 4)
 
         $btnStart.Add_Click({
@@ -3703,7 +3900,7 @@ try {
         $pnlRun.Dock        = 'Fill'
         $pnlRun.ColumnCount = 1
         $pnlRun.RowCount    = 9
-        $pnlRun.Padding     = Pd 16 12 16 12
+        $pnlRun.Padding     = Pd 20 14 20 12
         $pnlRun.Visible     = $false
         foreach ($rowType in @('AutoSize', 'AutoSize', 'AutoSize', 'AutoSize', 'AutoSize')) {
             [void]$pnlRun.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
@@ -3724,7 +3921,7 @@ try {
         $lblSummary = New-Object System.Windows.Forms.Label
         $lblSummary.Font = $script:FontNormal; $lblSummary.AutoSize = $true
         $lblSummary.ForeColor = $script:ColMuted
-        $lblSummary.MaximumSize = Sz 770 0
+        Add-Wrap $lblSummary 'form' 0
         $lblSummary.Margin = Pd 0 2 0 8
         $script:UI.lblSummary = $lblSummary
         $pnlRun.Controls.Add($lblSummary, 0, 1)
@@ -3732,7 +3929,7 @@ try {
         $lblNow = New-Object System.Windows.Forms.Label
         $lblNow.Font = $script:FontBold; $lblNow.AutoSize = $true
         $lblNow.ForeColor = $script:ColBlue
-        $lblNow.MaximumSize = Sz 770 0
+        Add-Wrap $lblNow 'form' 0
         $lblNow.Margin = Pd 0 0 0 6
         $script:UI.lblNow = $lblNow
         $pnlRun.Controls.Add($lblNow, 0, 2)
@@ -3758,6 +3955,7 @@ try {
         [void]$lvSteps.Columns.Add('Status', (S 160))
         [void]$lvSteps.Columns.Add('Time', (S 90))
         $script:UI.lvSteps = $lvSteps
+        $lvSteps.Add_SizeChanged({ Update-Layout })
         $pnlRun.Controls.Add($lvSteps, 0, 5)
 
         $chkDetails = New-Object System.Windows.Forms.CheckBox
@@ -3846,17 +4044,20 @@ try {
             }
         })
 
-        # Safety net: if the window ever opens collapsed, restore a sensible size
+        # The layout follows the window size; the Shown call covers the first display.
+        $form.Add_Resize({ Update-Layout })
         $form.Add_Shown({
-            if ($form.Height -lt (S 500) -or $form.Width -lt (S 700)) {
-                $form.MaximumSize = Sz 840 4000
-                $form.Size        = Sz 840 760
+            # safety net: if the window ever opens collapsed, restore a sensible size
+            if ($form.WindowState -eq 'Normal' -and ($form.Height -lt (S 400) -or $form.Width -lt (S 600))) {
+                $form.Size = Sz 1000 780
             }
+            Update-Layout
             $form.Activate()
         })
 
         Apply-Theme $form
         Restore-Settings
+        Update-Layout
 
         [void]$form.ShowDialog()
 

@@ -49,6 +49,7 @@ Because the engine runs in its own runspace, it cannot see script-level variable
 - Engine helpers `Get-TempContents` / `Remove-Scanned` are shared by steps 4 and 10. `Write-HtmlReport` builds the report from `$State.Results` and `$State.StepLog` (the lines each step printed).
 - The window code is rebuilt in a `do { } while ($script:Restart)` loop (language/theme buttons). Event handlers cannot see function-local variables, so dialogs keep their controls in `$script:Dlg`; do not use `GetNewClosure()`.
 - `T 'English text'` translates through `$script:NL` (Dutch). New window strings need a dictionary entry; the .ps1 must stay ASCII, so accented letters are written as `[char]0xEF` style expressions. Logs/engine output stay English.
+- **Layout follows the window size.** Labels/panels that wrap are registered with `Add-Wrap` (base `form` or `flow`, offset) and the step cards are in `$script:CardList`; `Update-Layout` (form Resize, Shown, run start; guarded by `$script:InLayout`) sets their widths. Do not hard-code widths for new controls: register them. Window size/maximized are saved in settings.json. Cards are a TableLayoutPanel (colored risk strip + content); steps are shown in groups (`$script:StepGroup`), run order stays by id. Buttons: `Name='primary'` accent, `'ghost'` toolbar, otherwise bordered; `Apply-Theme` styles them in both themes.
 - Sizes in the window go through `S`/`Sz`/`Pd` (DPI scale). Settings live in `%APPDATA%\PCMaintenance\settings.json`.
 - Decided against: the roadmap's "GitHub release check" (a network call outside the allowed list). Needs the owner's OK first.
 - Checking the .ps1 without PowerShell: `pip install tree-sitter tree-sitter-language-pack` then parse with the `powershell` grammar; the only expected ERROR nodes are the `1GB`/`1MB`/`1KB` numeric suffixes. It checks syntax only, not behavior.
@@ -79,7 +80,7 @@ Add an entry to `$StepInfo` (set `Modes`, `Risk`, `Requires`, optionally `Defaul
 
 ## Gotchas already hit (see HISTORY.md for the story)
 
-- **A `0` in a Form's `MaximumSize` collapses the window to a title bar.** Use a big number (currently 4000).
+- The main window is resizable on purpose (no `MaximumSize`). Never set a `MaximumSize` of `0` height on a Form (it collapses the window to a title bar); the `Add_Shown` safety net still restores a sane size.
 - `Show-Message 'a' + "b" 'title'` does not concatenate. Build the string first.
 - Menu/QuickEdit: clicking a classic console pauses output. The unattended path turns QuickEdit off.
 - Installers opened by winget may need a window; `--silent` only when asked (`-SilentWinget`).
