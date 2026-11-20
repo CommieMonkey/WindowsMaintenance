@@ -1,6 +1,6 @@
 # Roadmap
 
-Phases 1 and 2 are written but unexecuted (no PowerShell in the sandbox); phase 3 is not started. The step ids 1-14 are stable: new steps get new ids. Sizes: S / M / L. Marked with a star = suggested first.
+Phases 1 and 2 are built and were run by the owner on a Windows 11 PC. Phase 3 is written but has not been run on any server. The step ids 1-14 are stable: new steps get new ids. Sizes: S / M / L. Marked with a star = suggested first.
 
 ## Phase 1: foundation (do this first, it unlocks the rest)
 
@@ -70,6 +70,23 @@ Target: Windows Server 2019, 2022, 2025 (Desktop Experience and Server Core), pl
 | System repair (DISM + SFC) | DISM, SFC | off |
 | HTML report + exit code | | on |
 
-### Open questions for the owner
+### Phase 3 status (built, untested on servers)
+Decisions from the owner: generic servers and domain controllers, test VMs with and without a desktop, Server Core compatibility wanted.
+
+Built:
+- [x] Server mode with a maintenance-window gate (`-MaintenanceWindow`, confirmation in the window and the menu): read-only by default, steps 5/7/19 and installing updates need the window.
+- [x] Step 15 health report, 16 backup check (Windows Server Backup + VSS), 17 role checks (AD DS incl. dcdiag and replication, DNS, DHCP, IIS, Hyper-V, cluster), 18 storage health, 19 cleanup (component store, update cache, temp, IIS logs; never event logs).
+- [x] Step 7 analyze-only on servers; Windows Update scan (step 9) and Defender (skipped when passive) reused.
+- [x] Server Core: text menu (`Show-ConsoleMenu`), `-Menu`, `-Schedule`/`-RemoveSchedule` (task as SYSTEM), exe launcher keeps the console visible.
+- [x] Exit codes for monitoring now include `WARN` lines (1) as well as failures (2); `ServerCheck` preset; server logs in ProgramData.
+
+Not built:
+- [ ] `-ComputerName` / PowerShell remoting to run the engine on other servers.
+- [ ] Roles not covered: file server (shares, DFS-N, FSRM), print server, RDS, WSUS, certificate services, SQL.
+- [ ] Deeper AD checks: DFSR/SYSVOL migration state, trust health, AD Recycle Bin, replication topology.
+- [ ] Hyper-V replication health, cluster `Test-Cluster`, Storage Spaces Direct specifics.
+- [ ] Localized-output support for parsed text (`vssadmin`, `w32tm`).
+
+### Open questions for the owner (answered)
 - Which roles will the servers run (file server, domain controller, Hyper-V, IIS, other)? That decides which role checks come first.
 - Test VMs: 2019, 2022, 2025, each as Desktop and Core (Microsoft evaluation ISOs are enough).

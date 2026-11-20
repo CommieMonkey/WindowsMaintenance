@@ -40,6 +40,11 @@ internal static class Launcher
         try
         {
             bool unattended = args.Length > 0;
+            // Server Core has no desktop: the script then shows a text menu, so keep the console visible
+            if (!unattended && IsServerCore())
+            {
+                unattended = true;
+            }
             if (unattended)
             {
                 // Best effort: show output in the terminal this was started from
@@ -97,6 +102,20 @@ internal static class Launcher
             {
                 try { Directory.Delete(workDir, true); } catch { }
             }
+        }
+    }
+
+    private static bool IsServerCore()
+    {
+        try
+        {
+            object v = Microsoft.Win32.Registry.GetValue(
+                @"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion", "InstallationType", null);
+            return v != null && string.Equals(v.ToString(), "Server Core", StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
         }
     }
 

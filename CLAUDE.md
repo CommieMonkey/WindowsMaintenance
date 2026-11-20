@@ -8,7 +8,7 @@ Background and past decisions: `HISTORY.md`. Planned work: `ROADMAP.md`. User do
 
 | File | Role |
 |---|---|
-| `Run-Maintenance.ps1` | The whole program: engine + unattended mode + window (~3100 lines) |
+| `Run-Maintenance.ps1` | The whole program: engine + unattended mode + window (~3500 lines) |
 | `Run-Maintenance.cmd` | Double-click launcher for the .ps1 (execution-policy bypass, this run only) |
 | `Launcher.cs` | Exe launcher. Embeds the .ps1 as a resource, runs it with powershell.exe |
 | `app.manifest` | `requireAdministrator` for the exe |
@@ -22,7 +22,7 @@ Background and past decisions: `HISTORY.md`. Planned work: `ROADMAP.md`. User do
 - **`Launcher.cs` is C# 5.** It is compiled by the .NET Framework csc.exe: no `$""`, `?.`, `=>`, `nameof`, `out var`.
 - **Safe by default.** Deleting data must be opt-in or protected (see "Safety rules").
 - **Only built-in Windows tools.** No downloads, no third-party modules, no network calls except winget, DISM and Defender.
-- Unattended exit codes: 0 fine, 1 warnings (stopped / steps unavailable), 2 failures or could not start.
+- Unattended exit codes: 0 fine, 1 warnings (stopped, steps unavailable or gated, or any `WARN` line from a check), 2 failures or could not start.
 - There is **no PowerShell in the Linux sandbox**, so nothing can be run here. Checks done so far: brace/paren balance, ASCII-only, reading the code. Say so in every report; never claim "tested".
 
 ## Architecture of `Run-Maintenance.ps1`
@@ -32,26 +32,37 @@ Background and past decisions: `HISTORY.md`. Planned work: `ROADMAP.md`. User do
 3. **`$Engine = { param($Opt) ... }`**: a scriptblock holding all the work. It talks only through output lines:
    - normal line = log text
    - `@@STEP|<id>|START|<name>` and `@@STEP|<id>|END|<OK/Failed/Skipped>|<sec>|<msg>`
-   - `@@DONE|<GB freed>|<time>|<failed count>|<reboot pending>|<stopped>|<aborted>|<unavailable count>|<report file>`
+   - `@@DONE|<GB freed>|<time>|<failed count>|<reboot pending>|<stopped>|<aborted>|<unavailable count>|<report file>|<warnings>`
 4. **Unattended mode** (`-All`, `-Steps`, `-Skip*`): runs `& $Engine $runOpt` in the console and writes the log.
 5. **Window**: builds WinForms; `Start-Run` runs the engine in a **background runspace** (`$Engine.ToString()` passed to `AddScript`, options hashtable as the argument). A 300 ms timer (`Poll-Run`) reads the output collection and updates the UI.
 
 Because the engine runs in its own runspace, it cannot see script-level variables. Everything it needs comes through `$Opt`, and its helper functions are defined inside the block.
 
 ### `$Opt` keys
-`Steps` (int[]), `StepNames`, `KeepRestorePoints`, `WingetSilent`, `CleanStrength` (Standard/Gentle), `TempDays`, `EmptyRecycleBin`, `RepairMode` (Both/SfcOnly/DismOnly), `DefenderMode` (Quick/UpdateOnly/Full), `OptimizeDrive` (All or a letter), `IgnorePower`, `HistoryFile`, `CancelFile`, `Mode`, `SystemText`, `Unavailable` (hashtable id -> reason), `Preview`, `WingetIds`, `WindowsUpdateMode` (Scan/Install), `CacheWindowsUpdate`, `CacheDeliveryOpt`, `CacheBrowsers`, `DiskScan`, `ReportFile`. The window also has `Reboot`.
+`Steps` (int[]), `StepNames`, `KeepRestorePoints`, `WingetSilent`, `CleanStrength` (Standard/Gentle), `TempDays`, `EmptyRecycleBin`, `RepairMode` (Both/SfcOnly/DismOnly), `DefenderMode` (Quick/UpdateOnly/Full), `OptimizeDrive` (All or a letter), `IgnorePower`, `HistoryFile`, `CancelFile`, `Mode`, `SystemText`, `Unavailable` (hashtable id -> reason), `Preview`, `WingetIds`, `WindowsUpdateMode` (Scan/Install), `CacheWindowsUpdate`, `CacheDeliveryOpt`, `CacheBrowsers`, `DiskScan`, `ReportFile`, `MaintenanceWindow`, `Gated`, `IsDomainController`, `OptimizeAction` (Optimize/Analyze), `ServerCleanComponents`, `ServerCleanWuCache`, `ServerCleanTemp`, `IisLogDays`. The window also has `Reboot`.
 
 ### Phase 2 additions (see ROADMAP.md)
 - Steps 9-14 (Windows Update COM, extra caches, space report, crash summary, hardware health, security check-up). Step 10 has `DefaultOn = $false`: not ticked, not in `-All`/`$ModeDefaultIds`.
 - `New-RunOptions` is the one place with engine option defaults; the window (`Get-RunOptions`) and unattended mode both start from it. Add new `$Opt` keys there.
 - `$Presets` (QuickTuneUp / DeepClean / WeeklySafe) drive the window buttons and `-Preset`.
-- Preview mode (`$Opt.Preview`, `-Preview`): only steps 2, 4, 10; engine steps must not change anything when it is set; no CSV row, no report, no power wait.
+- Preview mode (`$Opt.Preview`, `-Preview`): only steps 2, 4, 10, 19; engine steps must not change anything when it is set; no CSV row, no report, no power wait.
 - Engine helpers `Get-TempContents` / `Remove-Scanned` are shared by steps 4 and 10. `Write-HtmlReport` builds the report from `$State.Results` and `$State.StepLog` (the lines each step printed).
 - The window code is rebuilt in a `do { } while ($script:Restart)` loop (language/theme buttons). Event handlers cannot see function-local variables, so dialogs keep their controls in `$script:Dlg`; do not use `GetNewClosure()`.
 - `T 'English text'` translates through `$script:NL` (Dutch). New window strings need a dictionary entry; the .ps1 must stay ASCII, so accented letters are written as `[char]0xEF` style expressions. Logs/engine output stay English.
 - Sizes in the window go through `S`/`Sz`/`Pd` (DPI scale). Settings live in `%APPDATA%\PCMaintenance\settings.json`.
 - Decided against: the roadmap's "GitHub release check" (a network call outside the allowed list). Needs the owner's OK first.
 - Checking the .ps1 without PowerShell: `pip install tree-sitter tree-sitter-language-pack` then parse with the `powershell` grammar; the only expected ERROR nodes are the `1GB`/`1MB`/`1KB` numeric suffixes. It checks syntax only, not behavior.
+
+### Phase 3 additions: Server mode (see ROADMAP.md)
+- Steps 15-19 are Server-only (`Modes = @('Server')`): health report, backup check, role checks (AD DS/DNS/DHCP/IIS/Hyper-V/cluster), storage health, cleanup (`Gate`, `DefaultOn = $false`). Steps 5-9 and 11-14 work in both modes.
+- **Maintenance window gate.** `Gate = $true` in the registry (steps 5, 7, 19) -> `$Gated` (Server mode only) -> `$Opt.Gated`. `Invoke-Step` skips a gated step unless `$Opt.MaintenanceWindow` (`-MaintenanceWindow`, or the window's confirmation dialog, or the menu's YES prompt). Step 7 is exempt while `$Opt.OptimizeAction -eq 'Analyze'` (the server default); step 9 installs only with the window. On a server `$ModeDefaultIds` is read-only steps only unless `-MaintenanceWindow`. Never make a server step change something outside this gate.
+- **Warnings.** Engine helpers `Add-Warning` / `Write-Check` print `  WARN  ` / `  OK    ` lines and count `$State.Warnings` (field 9 of `@@DONE`). Any warning gives exit code 1. New checks should use them, not raw `Say`.
+- Console path: `Invoke-ConsoleRun` (used by unattended mode and the text menu) runs the engine and computes the exit code; `Show-ConsoleMenu` is the Server Core fallback (`-Menu` forces it). Server Core is detected from `InstallationType`; `Launcher.cs` (`IsServerCore`) keeps the console visible for the exe there.
+- `Install-MaintTask` / `Remove-MaintTask` are top-level and shared by the window, the menu and `-Schedule`/`-RemoveSchedule`. Server -> runs as SYSTEM; PC -> current user, on AC power only.
+- `$LogDir` is `C:\ProgramData\PCMaintenance\Logs` in Server mode (SYSTEM has no useful profile), else `%USERPROFILE%\MaintenanceLogs`. `$SystemInfo` / `$RunMode` / `$ModeLabel` are computed at the top of the script because of that.
+- Shared engine helpers added: `Test-SafeTempRoot`, `Clear-WuDownloadCache` (steps 10 and 19). `$PreviewIds` = steps with a preview (2, 4, 10, 19).
+- Server-mode text parsing (`vssadmin`, `w32tm`, `dcdiag`) is best effort and English-oriented; keep failures non-fatal (INFO line, not a crash).
+- Status: **not run on any Windows Server**. Owner has test VMs (with and without GUI); the first real run is the test.
 
 ### Adding a step
 Add an entry to `$StepInfo` (set `Modes`, `Risk`, `Requires`, optionally `DefaultOn`), an `Invoke-Step -Id N -Name $Opt.StepNames[N-1]` block in the engine, any dropdown to `$script:StepOptions`, a line in README. Everything printed inside the block must go through `Say`.

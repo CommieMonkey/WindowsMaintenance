@@ -22,6 +22,9 @@
      12. Crash and error summary
      13. Hardware health
      14. Security check-up
+   Server mode only:
+     15. Server health report   16. Backup check   17. Server roles check (AD DS, DNS,
+     DHCP, IIS, Hyper-V, cluster)   18. Storage health   19. Server cleanup (off by default)
 
     On a laptop the charger must be connected.
 
@@ -52,16 +55,28 @@
     Unattended mode: restart the PC 30 seconds after finishing.
 .PARAMETER Preset
     Unattended run of a ready-made selection: QuickTuneUp (steps 4,7,8),
-    DeepClean (1,2,3,4,5,7,8,10) or WeeklySafe (2,6,7,8,9,14). Ignored when -Steps is given.
+    DeepClean (1,2,3,4,5,7,8,10), WeeklySafe (2,6,7,8,9,14) or, on servers, ServerCheck
+    (8,9,12,13,14,15,16,17,18: read-only). Ignored when -Steps is given.
 .PARAMETER Preview
-    Unattended mode: only show what steps 2, 4 and 10 would do. Nothing is installed or deleted.
+    Unattended mode: only show what steps 2, 4, 10 and 19 would do. Nothing is installed or deleted.
+.PARAMETER MaintenanceWindow
+    Server mode: confirms this is a planned maintenance window. Without it, steps
+    that change a server (5 repair, 7 optimize, 19 cleanup, installing updates) are
+    skipped and only the read-only checks run.
+.PARAMETER Menu
+    Show a text menu instead of the window (used automatically on Server Core).
+.PARAMETER Schedule
+    Create the weekly scheduled task (see -ScheduleDay, -ScheduleTime, -Preset) and exit.
+    On a server it runs as SYSTEM; add -MaintenanceWindow to allow changes in that run.
+.PARAMETER RemoveSchedule
+    Remove the weekly scheduled task and exit.
 .PARAMETER Mode
     Auto (default), Pc or Server. Auto picks Server on Windows Server and Pc on
     Windows 10/11. Only the steps that belong to the mode are offered or run.
 
-Exit code (unattended mode): 0 = all fine, 1 = warnings (stopped by the user, or
-a step skipped because this PC cannot do it), 2 = a step failed or the run
-could not start.
+Exit code (unattended mode): 0 = all fine, 1 = warnings (stopped by the user, a step
+skipped because this PC cannot do it or needs -MaintenanceWindow, or a check
+reported a WARN line), 2 = a step failed or the run could not start.
 
 .EXAMPLE
     .\Run-Maintenance.ps1                    (opens the window)
@@ -80,8 +95,14 @@ param(
     [switch]$IgnorePower,
     [switch]$Reboot,
     [ValidateSet('Auto', 'Pc', 'Server')][string]$Mode = 'Auto',
-    [ValidateSet('QuickTuneUp', 'DeepClean', 'WeeklySafe')][string]$Preset,
-    [switch]$Preview
+    [ValidateSet('QuickTuneUp', 'DeepClean', 'WeeklySafe', 'ServerCheck')][string]$Preset,
+    [switch]$Preview,
+    [switch]$MaintenanceWindow,
+    [switch]$Menu,
+    [switch]$Schedule,
+    [switch]$RemoveSchedule,
+    [ValidateSet('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday')][string]$ScheduleDay = 'Sunday',
+    [string]$ScheduleTime = '03:00'
 )
 
 # ---------------------------------------------------------------- Self-elevate
@@ -112,8 +133,34 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 
 $headless = [bool]($All -or $Steps -or $SkipSFC -or $SkipDefender -or $SkipRestorePoint -or $Preset -or $Preview)
 
+# What are we running on? Product type 1 = workstation, 2/3 = domain controller/server.
+# InstallationType (registry) is Client, Server or "Server Core" (no desktop).
+function Get-SystemInfo {
+    $r = @{ ProductType = 1; InstallType = 'Client'; Text = 'Windows (version unknown)' }
+    try {
+        $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+        $cv = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction Stop
+        $r.ProductType = [int]$os.ProductType
+        if ($cv.InstallationType) { $r.InstallType = [string]$cv.InstallationType }
+        $build = [string]$os.BuildNumber
+        if ($null -ne $cv.UBR) { $build += ".$($cv.UBR)" }
+        $r.Text = "{0}, build {1}, edition {2}, install type {3}" -f ([string]$os.Caption).Trim(), $build, $cv.EditionID, $r.InstallType
+    } catch { }
+    return $r
+}
+
+$SystemInfo = Get-SystemInfo
+if ($Mode -ne 'Auto')                  { $RunMode = $Mode }
+elseif ($SystemInfo.ProductType -eq 1) { $RunMode = 'Pc' }
+else                                   { $RunMode = 'Server' }
+
+$ModeLabel = $RunMode
+if ($SystemInfo.ProductType -eq 2) { $ModeLabel += ' (domain controller)' }
+
 # ------------------------------------------------------------- Shared settings
-$LogDir      = Join-Path $env:USERPROFILE 'MaintenanceLogs'
+# Servers keep logs in ProgramData (they also run as SYSTEM); a PC keeps them in the user profile.
+if ($RunMode -eq 'Server') { $LogDir = Join-Path $env:ProgramData 'PCMaintenance\Logs' }
+else                       { $LogDir = Join-Path $env:USERPROFILE 'MaintenanceLogs' }
 $HistoryFile = Join-Path $LogDir 'MaintenanceHistory.csv'
 $CancelFile  = Join-Path $env:TEMP 'pc-maintenance-stop.flag'
 New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
@@ -159,7 +206,7 @@ $StepInfo = @(
        Modes = @('Pc'); Risk = 'Deletes'; Requires = $null },
     @{ Id = 5; Name = 'System repair (DISM + SFC)';      Title = 'Check and repair Windows system files';
        Desc = 'Scans Windows for damaged files and repairs them. This is the slowest step.'; Time = '10 to 30 minutes';
-       Modes = @('Pc', 'Server'); Risk = 'Changes'; Requires = $null },
+       Modes = @('Pc', 'Server'); Risk = 'Changes'; Gate = $true; Requires = $null },
     @{ Id = 6; Name = 'Defender update + scan';          Title = 'Update virus definitions and scan';
        Desc = 'Updates Windows Defender and runs a quick virus scan.'; Time = '2 to 10 minutes';
        Modes = @('Pc', 'Server'); Risk = 'Changes';
@@ -175,7 +222,7 @@ $StepInfo = @(
        } },
     @{ Id = 7; Name = 'Optimize drives (TRIM/defrag)';   Title = 'Optimize my drives';
        Desc = 'Keeps SSDs fast (TRIM) and tidies hard disks (defrag). Windows picks the right method for every drive.'; Time = '1 to 30 minutes';
-       Modes = @('Pc', 'Server'); Risk = 'Changes';
+       Modes = @('Pc', 'Server'); Risk = 'Changes'; Gate = $true;
        Requires = { if (-not (Get-Command Optimize-Volume -ErrorAction SilentlyContinue)) { 'Optimize-Volume is not available on this PC.' } } },
     @{ Id = 8; Name = 'Disk health report';              Title = 'Check the health of my disks';
        Desc = 'Shows whether your drives report any problems and how much space is left.'; Time = 'under 1 minute';
@@ -200,7 +247,23 @@ $StepInfo = @(
        Requires = { if (-not (Get-Command Get-StorageReliabilityCounter -ErrorAction SilentlyContinue)) { 'Get-StorageReliabilityCounter is not available on this PC.' } } },
     @{ Id = 14; Name = 'Security check-up';              Title = 'Run a security check-up';
        Desc = 'Checks Defender, the firewall, BitLocker, Secure Boot, the TPM, SMBv1 and Remote Desktop. Report only: nothing is changed.'; Time = 'under 1 minute';
-       Modes = @('Pc', 'Server'); Risk = 'ReadOnly'; Requires = $null }
+       Modes = @('Pc', 'Server'); Risk = 'ReadOnly'; Requires = $null },
+    @{ Id = 15; Name = 'Server health report';           Title = 'Check the health of this server';
+       Desc = 'Uptime, pending restart, free disk space, automatic services that are not running, critical events, the last installed update, expiring certificates and time synchronization. Report only.'; Time = '1 to 3 minutes';
+       Modes = @('Server'); Risk = 'ReadOnly'; Requires = $null },
+    @{ Id = 16; Name = 'Backup check';                   Title = 'Check the backups';
+       Desc = 'Windows Server Backup: the last successful backup and its result. Also checks that the VSS writers are stable and shows the shadow storage. Report only.'; Time = 'under 1 minute';
+       Modes = @('Server'); Risk = 'ReadOnly'; Requires = $null },
+    @{ Id = 17; Name = 'Server roles check';             Title = 'Check the installed server roles';
+       Desc = 'Finds the installed roles and checks them: Active Directory (dcdiag, replication, SYSVOL), DNS, DHCP, IIS, Hyper-V and failover clustering. Report only.'; Time = '1 to 10 minutes';
+       Modes = @('Server'); Risk = 'ReadOnly'; Requires = $null },
+    @{ Id = 18; Name = 'Storage health';                 Title = 'Check storage pools, disks and volumes';
+       Desc = 'Health of Storage Spaces pools and virtual disks, physical disks and volumes, and running repair jobs. Report only.'; Time = 'under 1 minute';
+       Modes = @('Server'); Risk = 'ReadOnly';
+       Requires = { if (-not (Get-Command Get-StoragePool -ErrorAction SilentlyContinue)) { 'The storage cmdlets are not available on this server.' } } },
+    @{ Id = 19; Name = 'Server cleanup';                 Title = 'Clean up this server';
+       Desc = 'Cleans the Windows component store (without /ResetBase), the Windows Update download cache, old temp files and old IIS logs. Event logs are never touched. Needs a maintenance window and is off by default.'; Time = '2 to 20 minutes';
+       Modes = @('Server'); Risk = 'Deletes'; Gate = $true; DefaultOn = $false; Requires = $null }
 )
 
 # Ready-made selections (window buttons and -Preset)
@@ -208,28 +271,8 @@ $Presets = [ordered]@{
     QuickTuneUp = @(4, 7, 8)
     DeepClean   = @(1, 2, 3, 4, 5, 7, 8, 10)
     WeeklySafe  = @(2, 6, 7, 8, 9, 14)
+    ServerCheck = @(8, 9, 12, 13, 14, 15, 16, 17, 18)
 }
-
-# What are we running on? Product type 1 = workstation, 2/3 = domain controller/server.
-# InstallationType (registry) is Client, Server or "Server Core" (no desktop).
-function Get-SystemInfo {
-    $r = @{ ProductType = 1; InstallType = 'Client'; Text = 'Windows (version unknown)' }
-    try {
-        $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
-        $cv = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction Stop
-        $r.ProductType = [int]$os.ProductType
-        if ($cv.InstallationType) { $r.InstallType = [string]$cv.InstallationType }
-        $build = [string]$os.BuildNumber
-        if ($null -ne $cv.UBR) { $build += ".$($cv.UBR)" }
-        $r.Text = "{0}, build {1}, edition {2}, install type {3}" -f ([string]$os.Caption).Trim(), $build, $cv.EditionID, $r.InstallType
-    } catch { }
-    return $r
-}
-
-$SystemInfo = Get-SystemInfo
-if ($Mode -ne 'Auto')                  { $RunMode = $Mode }
-elseif ($SystemInfo.ProductType -eq 1) { $RunMode = 'Pc' }
-else                                   { $RunMode = 'Server' }
 
 # Steps this mode offers, and the ones this PC cannot run (id -> reason).
 $ModeStepIds = @($StepInfo | Where-Object { $_.Modes -contains $RunMode } | ForEach-Object { [int]$_.Id })
@@ -242,7 +285,18 @@ foreach ($si in $StepInfo) {
 }
 
 # Steps that are ticked / run by default (a step can set DefaultOn = $false)
-$ModeDefaultIds = @($StepInfo | Where-Object { $_.Modes -contains $RunMode -and $_.DefaultOn -ne $false } | ForEach-Object { [int]$_.Id })
+# On a server only read-only steps are default, unless -MaintenanceWindow says changes are fine.
+$ModeDefaultIds = @($StepInfo | Where-Object {
+    $_.Modes -contains $RunMode -and $_.DefaultOn -ne $false -and
+    ($RunMode -ne 'Server' -or $_.Risk -eq 'ReadOnly' -or $MaintenanceWindow)
+} | ForEach-Object { [int]$_.Id })
+
+# Server steps that are skipped outside a maintenance window (the engine enforces this)
+$Gated = @()
+if ($RunMode -eq 'Server') { $Gated = @($StepInfo | Where-Object { $_.Modes -contains 'Server' -and $_.Gate -eq $true } | ForEach-Object { [int]$_.Id }) }
+
+# Steps that can show what they would do without doing it
+$PreviewIds = @(2, 4, 10, 19)
 
 # Defaults for every engine option. The window and the unattended mode both start from this.
 function New-RunOptions {
@@ -272,14 +326,15 @@ function New-RunOptions {
         Mode               = $RunMode
         SystemText         = $SystemInfo.Text
         Unavailable        = $Unavailable
+        MaintenanceWindow  = [bool]$MaintenanceWindow
+        Gated              = $Gated
+        IsDomainController = ($SystemInfo.ProductType -eq 2)
+        OptimizeAction     = $(if ($RunMode -eq 'Server') { 'Analyze' } else { 'Optimize' })
+        ServerCleanComponents = $true
+        ServerCleanWuCache = $true
+        ServerCleanTemp    = $true
+        IisLogDays         = 90           # 0 = leave IIS logs alone
     }
-}
-
-# Server Core has no desktop, so the window cannot open there.
-if (-not $headless -and $SystemInfo.InstallType -eq 'Server Core') {
-    Write-Host "This is Windows Server Core (no desktop), so the window cannot open. Run with -All or -Steps instead." -ForegroundColor Red
-    Start-Sleep -Seconds 5
-    exit 2
 }
 
 # Turns marker lines from the engine into readable text (for the log).
@@ -319,7 +374,7 @@ function Resolve-StepSelection([string]$Text, [int]$Max) {
 #  lines starting with "@@" are progress markers:
 #     @@STEP|<id>|START|<name>
 #     @@STEP|<id>|END|<OK/Failed/Skipped>|<seconds>|<message>
-#     @@DONE|<GB freed>|<time>|<failed steps>|<reboot pending>|<stopped>|<aborted>|<unavailable steps>|<report file>
+#     @@DONE|<GB freed>|<time>|<failed steps>|<reboot pending>|<stopped>|<aborted>|<unavailable steps>|<report file>|<warnings>
 # =============================================================================
 $Engine = {
     param($Opt)
@@ -333,9 +388,16 @@ $Engine = {
         Unavail   = 0
         Results   = New-Object System.Collections.Generic.List[object]
         StepLog   = @{}
+        Warnings  = 0
     }
 
     function Say([string]$Text) { Write-Output $Text }
+
+    # A check that found something worth attention. Counted; any warning makes the exit code 1.
+    function Add-Warning([string]$Text) { $State.Warnings++; Say "  WARN  $Text" }
+    function Write-Check([bool]$Ok, [string]$Text) {
+        if ($Ok) { Say "  OK    $Text" } else { Add-Warning $Text }
+    }
 
     function Clean-Msg([string]$Text) {
         return (($Text -replace '[\r\n\|]+', ' ').Trim())
@@ -459,6 +521,37 @@ $Engine = {
         } catch { return -1 }
     }
 
+    # Only folders named Temp or Tmp that are not junctions.
+    function Test-SafeTempRoot([string]$Path) {
+        try { $full = [System.IO.Path]::GetFullPath($Path).TrimEnd('\') } catch { return $false }
+        if ((Split-Path $full -Leaf) -notin @('Temp', 'Tmp')) { return $false }
+        return (Test-PlainFolder $full)
+    }
+
+    # Empties the Windows Update download folder (the update services are stopped meanwhile).
+    function Clear-WuDownloadCache {
+        $everything = [datetime]::MaxValue
+        $wu = "$env:SystemRoot\SoftwareDistribution\Download"
+        if (-not (Test-PlainFolder $wu)) { Say 'Windows Update download cache: nothing to clear.'; return }
+        Say "Windows Update download cache ($wu):"
+        $stopped = @()
+        $skip = $false
+        if (-not $Opt.Preview) {
+            foreach ($n in 'wuauserv', 'bits') {
+                $svc = Get-Service $n -ErrorAction SilentlyContinue
+                if ($svc -and $svc.Status -eq 'Running') {
+                    try { Stop-Service $n -Force -ErrorAction Stop; $stopped += $n }
+                    catch { Say "  WARNING: could not stop the $n service - leaving this cache alone."; $skip = $true }
+                }
+            }
+        }
+        try {
+            if (-not $skip) { Remove-Scanned (Get-TempContents -Root $wu -Cutoff $everything) $everything }
+        } finally {
+            foreach ($n in $stopped) { Start-Service $n -WarningAction SilentlyContinue -ErrorAction SilentlyContinue }
+        }
+    }
+
     function Get-HtmlText([string]$Text) { return [System.Net.WebUtility]::HtmlEncode($Text) }
 
     function Write-HtmlReport {
@@ -474,6 +567,7 @@ $Engine = {
         [void]$sb.AppendLine(('<tr><th>Difference</th><td>{0:N2} GB</td></tr>' -f ($FreeAfter - $FreeBefore)))
         [void]$sb.AppendLine(('<tr><th>Total time</th><td>{0}</td></tr>' -f (Get-HtmlText $Elapsed)))
         [void]$sb.AppendLine(('<tr><th>Restart pending</th><td>{0}</td></tr>' -f $(if ($RebootPending) { 'yes' } else { 'no' })))
+        [void]$sb.AppendLine(('<tr><th>Warnings</th><td>{0}</td></tr>' -f $State.Warnings))
         [void]$sb.AppendLine('</table><h2>Steps</h2><table><tr><th>Step</th><th>Status</th><th>Time</th><th>Message</th></tr>')
         foreach ($r in $State.Results) {
             if ($r.Message -eq 'Not selected') { continue }
@@ -530,6 +624,16 @@ $Engine = {
         }
         if ($Opt.Unavailable -and $Opt.Unavailable.ContainsKey($Id)) {
             $why = [string]$Opt.Unavailable[$Id]
+            $State.Unavail++
+            Say "Step $Id skipped: $why"
+            Add-Result $Name 'Skipped' '00:00:00' $why
+            Say "@@STEP|$Id|END|Skipped|0|$(Clean-Msg $why)"
+            return
+        }
+        $needsWindow = (@($Opt.Gated) -contains $Id) -and -not $Opt.Preview -and -not $Opt.MaintenanceWindow
+        if ($Id -eq 7 -and [string]$Opt.OptimizeAction -eq 'Analyze') { $needsWindow = $false }   # analyzing changes nothing
+        if ($needsWindow) {
+            $why = 'Changes the server: needs a maintenance window (-MaintenanceWindow)'
             $State.Unavail++
             Say "Step $Id skipped: $why"
             Add-Result $Name 'Skipped' '00:00:00' $why
@@ -766,12 +870,6 @@ public static extern int SRRemoveRestorePoint(int dwRPNum);
         $days   = [math]::Max(1, [int]$Opt.TempDays)
         $cutoff = (Get-Date).AddDays(-$days)
 
-        function Test-SafeTempRoot([string]$Path) {
-            try { $full = [System.IO.Path]::GetFullPath($Path).TrimEnd('\') } catch { return $false }
-            if ((Split-Path $full -Leaf) -notin @('Temp', 'Tmp')) { return $false }
-            return (Test-PlainFolder $full)
-        }
-
         foreach ($path in @($env:TEMP, "$env:SystemRoot\Temp") | Select-Object -Unique) {
             if (-not $path -or -not (Test-Path -LiteralPath $path)) { continue }
             if (-not (Test-SafeTempRoot $path)) {
@@ -836,12 +934,17 @@ public static extern int SRRemoveRestorePoint(int dwRPNum);
             $vols = @($vols | Where-Object { "$($_.DriveLetter)" -eq [string]$Opt.OptimizeDrive })
         }
         if ($vols.Count -eq 0) { Say "No matching drives found." }
+        $analyze = ([string]$Opt.OptimizeAction -eq 'Analyze')
         foreach ($v in $vols) {
             $letter = $v.DriveLetter
-            Say "Optimizing ${letter}: ..."
+            if ($analyze) { Say "Analyzing ${letter}: (nothing is changed) ..." } else { Say "Optimizing ${letter}: ..." }
             try {
-                # Picks TRIM or defrag automatically per media type
-                Optimize-Volume -DriveLetter $letter -Verbose -ErrorAction Stop
+                if ($analyze) {
+                    Optimize-Volume -DriveLetter $letter -Analyze -Verbose -ErrorAction Stop
+                } else {
+                    # Picks TRIM or defrag automatically per media type
+                    Optimize-Volume -DriveLetter $letter -Verbose -ErrorAction Stop
+                }
             } catch {
                 Say "WARNING: could not optimize ${letter}: $($_.Exception.Message)"
                 $failed += $letter
@@ -872,6 +975,10 @@ public static extern int SRRemoveRestorePoint(int dwRPNum);
     # ---------------------------------------------------- 9. Windows Update
     Invoke-Step -Id 9 -Name $Opt.StepNames[8] -Action {
         $install = ([string]$Opt.WindowsUpdateMode -eq 'Install') -and -not $Opt.Preview
+        if ($install -and $Opt.Mode -eq 'Server' -and -not $Opt.MaintenanceWindow) {
+            Say 'Installing updates on a server needs -MaintenanceWindow: scanning only.'
+            $install = $false
+        }
         $session  = New-Object -ComObject Microsoft.Update.Session
         $searcher = $session.CreateUpdateSearcher()
         Say 'Searching for updates (Windows Update or your WSUS server)...'
@@ -961,30 +1068,7 @@ public static extern int SRRemoveRestorePoint(int dwRPNum);
             Remove-Scanned $merged $everything
         }
 
-        if ($Opt.CacheWindowsUpdate) {
-            $wu = "$env:SystemRoot\SoftwareDistribution\Download"
-            if (Test-PlainFolder $wu) {
-                Say "Windows Update download cache ($wu):"
-                $stopped = @()
-                $skip = $false
-                if (-not $Opt.Preview) {
-                    foreach ($n in 'wuauserv', 'bits') {
-                        $svc = Get-Service $n -ErrorAction SilentlyContinue
-                        if ($svc -and $svc.Status -eq 'Running') {
-                            try { Stop-Service $n -Force -ErrorAction Stop; $stopped += $n }
-                            catch { Say "  WARNING: could not stop the $n service - leaving this cache alone."; $skip = $true }
-                        }
-                    }
-                }
-                try {
-                    if (-not $skip) { Remove-Scanned (Get-TempContents -Root $wu -Cutoff $everything) $everything }
-                } finally {
-                    foreach ($n in $stopped) { Start-Service $n -ErrorAction SilentlyContinue }
-                }
-            } else {
-                Say 'Windows Update download cache: nothing to clear.'
-            }
-        }
+        if ($Opt.CacheWindowsUpdate) { Clear-WuDownloadCache }
 
         if ($Opt.CacheDeliveryOpt) {
             if (Get-Command Delete-DeliveryOptimizationCache -ErrorAction SilentlyContinue) {
@@ -1088,7 +1172,7 @@ public static extern int SRRemoveRestorePoint(int dwRPNum);
     # ---------------------------------------------------- 13. Hardware health
     Invoke-Step -Id 13 -Name $Opt.StepNames[12] -Action {
         function Get-Val($v) { if ($null -eq $v) { return 'n/a' } else { return $v } }
-        $warn = 0
+        $warnStart = $State.Warnings
         Say '--- Drives'
         foreach ($d in @(Get-PhysicalDisk)) {
             Say ("{0} ({1}, {2})" -f $d.FriendlyName, $d.MediaType, $d.HealthStatus)
@@ -1096,9 +1180,9 @@ public static extern int SRRemoveRestorePoint(int dwRPNum);
             if (-not $c) { Say '  no reliability counters available'; continue }
             Say ("  temperature: {0} C   wear: {1}%   power-on hours: {2}   read errors: {3}   write errors: {4}" -f
                  (Get-Val $c.Temperature), (Get-Val $c.Wear), (Get-Val $c.PowerOnHours), (Get-Val $c.ReadErrorsTotal), (Get-Val $c.WriteErrorsTotal))
-            if ($c.Wear -ge 80)                { Say '  WARNING: this SSD is heavily worn.'; $warn++ }
-            if ($c.Temperature -ge 70)         { Say '  WARNING: this drive runs hot.'; $warn++ }
-            if ($c.ReadErrorsTotal -gt 0 -or $c.WriteErrorsTotal -gt 0) { Say '  WARNING: the drive reports read/write errors.'; $warn++ }
+            if ($c.Wear -ge 80)                { Add-Warning 'This SSD is heavily worn.' }
+            if ($c.Temperature -ge 70)         { Add-Warning 'This drive runs hot.' }
+            if ($c.ReadErrorsTotal -gt 0 -or $c.WriteErrorsTotal -gt 0) { Add-Warning 'The drive reports read/write errors.' }
         }
 
         Say '--- Battery'
@@ -1107,7 +1191,7 @@ public static extern int SRRemoveRestorePoint(int dwRPNum);
         if ($full -and $design -and $design.DesignedCapacity -gt 0) {
             $pct = [math]::Round(100 * $full.FullChargedCapacity / $design.DesignedCapacity)
             Say ("  full charge: {0} mWh of {1} mWh when new = {2}% health" -f $full.FullChargedCapacity, $design.DesignedCapacity, $pct)
-            if ($pct -lt 60) { Say '  WARNING: the battery has lost a lot of capacity.'; $warn++ }
+            if ($pct -lt 60) { Add-Warning 'The battery has lost a lot of capacity.' }
         } else {
             Say '  no battery found'
         }
@@ -1124,15 +1208,12 @@ public static extern int SRRemoveRestorePoint(int dwRPNum);
             }
             if ($bad.Count -gt 0) { throw "Disk scan found problems on: $($bad -join ', '). Run chkdsk." }
         }
-        Say "Hardware check finished with $warn warning(s)."
+        Say "Hardware check finished with $($State.Warnings - $warnStart) warning(s)."
     }
 
     # ---------------------------------------------------- 14. Security check-up
     Invoke-Step -Id 14 -Name $Opt.StepNames[13] -Action {
-        $sec = @{ Warn = 0 }
-        function Write-Check([bool]$Ok, [string]$Text) {
-            if ($Ok) { Say "  OK    $Text" } else { Say "  WARN  $Text"; $sec.Warn++ }
-        }
+        $warnStart = $State.Warnings
 
         try {
             $mp = Get-MpComputerStatus -ErrorAction Stop
@@ -1178,7 +1259,406 @@ public static extern int SRRemoveRestorePoint(int dwRPNum);
         $uac = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -ErrorAction SilentlyContinue).EnableLUA
         Write-Check ($uac -eq 1) 'User Account Control (UAC) is on'
 
-        Say "Security check-up finished with $($sec.Warn) warning(s)."
+        Say "Security check-up finished with $($State.Warnings - $warnStart) warning(s)."
+    }
+
+    # ---------------------------------------------------- 15. Server health report
+    Invoke-Step -Id 15 -Name $Opt.StepNames[14] -Action {
+        $os = Get-CimInstance Win32_OperatingSystem
+        $up = (Get-Date) - $os.LastBootUpTime
+        Say '--- System'
+        Say ("  Uptime: {0} day(s) {1} hour(s) (last start {2:yyyy-MM-dd HH:mm})" -f [math]::Floor($up.TotalDays), $up.Hours, $os.LastBootUpTime)
+
+        $why = @()
+        if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') { $why += 'component servicing' }
+        if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired') { $why += 'Windows Update' }
+        if ((Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -ErrorAction SilentlyContinue).PendingFileRenameOperations) { $why += 'pending file renames' }
+        if ($why.Count -gt 0) { Add-Warning ("A restart is pending ({0})." -f ($why -join ', ')) }
+        else { Say '  OK    No restart is pending' }
+
+        Say '--- Disk space'
+        foreach ($v in @(Get-Volume | Where-Object { $_.DriveLetter -and $_.DriveType -eq 'Fixed' -and $_.Size -gt 0 })) {
+            $pct  = 100 * $v.SizeRemaining / $v.Size
+            $text = ("Drive {0}: {1:N0}% free ({2} of {3})" -f $v.DriveLetter, $pct, (Format-Bytes $v.SizeRemaining), (Format-Bytes $v.Size))
+            if ($pct -lt 10) { Add-Warning ($text + ' - critical') } else { Write-Check ($pct -ge 15) $text }
+        }
+
+        Say '--- Services'
+        # Services that are normally stopped although they are set to automatic
+        $ignore = @('sppsvc', 'gupdate', 'gupdatem', 'edgeupdate', 'edgeupdatem', 'RemoteRegistry', 'TrustedInstaller', 'MapsBroker',
+                    'clr_optimization_*', 'tiledatamodelsvc', 'CDPUserSvc_*', 'OneSyncSvc_*', 'PimIndexMaintenanceSvc_*', 'UnistoreSvc_*',
+                    'UserDataSvc_*', 'WpnUserService_*', 'cbdhsvc_*', 'BcastDVRUserService_*', 'CaptureService_*', 'DevicesFlowUserSvc_*',
+                    'webthreatdefsvc', 'MicrosoftEdgeElevationService')
+        $stopped = @()
+        foreach ($svc in @(Get-CimInstance Win32_Service -Filter "StartMode='Auto' AND State<>'Running'" -ErrorAction SilentlyContinue)) {
+            if ($svc.DelayedAutoStart) { continue }
+            $name = [string]$svc.Name
+            if (@($ignore | Where-Object { $name -like $_ }).Count -gt 0) { continue }
+            $stopped += $svc
+        }
+        if ($stopped.Count -eq 0) {
+            Say '  OK    All automatic services are running (delayed-start services are not checked)'
+        } else {
+            Add-Warning ("{0} automatic service(s) are not running (some can be normal, for example services that stop when they have no work):" -f $stopped.Count)
+            foreach ($svc in ($stopped | Select-Object -First 15)) {
+                Say ("        {0} ({1}), exit code {2}" -f $svc.Name, $svc.DisplayName, $svc.ExitCode)
+            }
+        }
+
+        Say '--- Event log (last 7 days)'
+        $since = (Get-Date).AddDays(-7)
+        foreach ($log in 'System', 'Application') {
+            $crit = @(Get-WinEvent -FilterHashtable @{ LogName = $log; Level = 1; StartTime = $since } -ErrorAction SilentlyContinue)
+            $err  = @(Get-WinEvent -FilterHashtable @{ LogName = $log; Level = 2; StartTime = $since } -ErrorAction SilentlyContinue)
+            Say ("  {0}: {1} critical, {2} error event(s)" -f $log, $crit.Count, $err.Count)
+            if ($crit.Count -gt 0) { Add-Warning ("{0} critical event(s) in the {1} log" -f $crit.Count, $log) }
+            @($crit + $err) | Group-Object ProviderName | Sort-Object Count -Descending | Select-Object -First 5 |
+                ForEach-Object { Say ("        {0,4} x {1}" -f $_.Count, $_.Name) }
+        }
+
+        Say '--- Updates'
+        $hf = @(Get-HotFix -ErrorAction SilentlyContinue | Where-Object { $_.InstalledOn } | Sort-Object { [datetime]$_.InstalledOn } -Descending)
+        if ($hf.Count -gt 0) {
+            $last = [datetime]$hf[0].InstalledOn
+            $days = [int]((Get-Date) - $last).TotalDays
+            Write-Check ($days -le 60) ("Last installed update: {0} on {1:yyyy-MM-dd} ({2} days ago)" -f $hf[0].HotFixID, $last, $days)
+        } else {
+            Say '  INFO  Get-HotFix reported no installed updates.'
+        }
+
+        Say '--- Certificates (local computer, personal store)'
+        $soon  = (Get-Date).AddDays(30)
+        $certs = @(Get-ChildItem Cert:\LocalMachine\My -ErrorAction SilentlyContinue | Where-Object { $_.NotAfter -lt $soon })
+        if ($certs.Count -eq 0) { Say '  OK    No certificate expires within 30 days' }
+        foreach ($c in $certs) {
+            if ($c.NotAfter -lt (Get-Date)) { Add-Warning ("Certificate EXPIRED on {0:yyyy-MM-dd}: {1}" -f $c.NotAfter, $c.Subject) }
+            else                            { Add-Warning ("Certificate expires on {0:yyyy-MM-dd}: {1}" -f $c.NotAfter, $c.Subject) }
+        }
+
+        Say '--- Time synchronization'
+        $src = (& w32tm.exe /query /source 2>&1 | Out-String).Trim()
+        if ($LASTEXITCODE -ne 0) {
+            Add-Warning "The Windows Time service does not answer: $src"
+        } else {
+            Say "  Source: $src"
+            Write-Check ($src -notmatch 'Local CMOS Clock|Free-running System Clock') 'The time source is not the local clock'
+            (& w32tm.exe /query /status 2>&1) | ForEach-Object { $l = ([string]$_).Trim(); if ($l) { Say "  $l" } }
+        }
+        Say 'The firewall is checked in step 14 (security check-up).'
+    }
+
+    # ---------------------------------------------------- 16. Backup check
+    Invoke-Step -Id 16 -Name $Opt.StepNames[15] -Action {
+        Say '--- Windows Server Backup'
+        if (Get-Command Get-WBSummary -ErrorAction SilentlyContinue) {
+            $wb = $null
+            try { $wb = Get-WBSummary -ErrorAction Stop } catch { }
+            if ($wb -and $wb.LastSuccessfulBackupTime -and ([datetime]$wb.LastSuccessfulBackupTime).Year -gt 2000) {
+                $when = [datetime]$wb.LastSuccessfulBackupTime
+                $age  = [int]((Get-Date) - $when).TotalDays
+                Write-Check ($age -le 7) ("Last successful backup: {0:yyyy-MM-dd HH:mm} ({1} days ago)" -f $when, $age)
+                Say ("  Last backup result code: 0x{0:X}   versions kept: {1}   next backup: {2}" -f [int]$wb.LastBackupResultHR, $wb.NumberOfVersions, $wb.NextBackupTime)
+                if ([int]$wb.LastBackupResultHR -ne 0) { Add-Warning 'The last backup attempt did not finish cleanly.' }
+            } else {
+                Add-Warning 'Windows Server Backup is installed but has no successful backup.'
+            }
+        } else {
+            Say '  INFO  Windows Server Backup is not installed.'
+        }
+        $other = @(Get-Service -ErrorAction SilentlyContinue |
+                   Where-Object { $_.Status -eq 'Running' -and $_.DisplayName -match 'Veeam|Acronis|Commvault|Backup Exec|Altaro|Datto|Rubrik|Cohesity|Azure Backup|Recovery Services' })
+        if ($other.Count -gt 0) {
+            Say ("  INFO  Other backup software seems to be running: {0}" -f (($other | Select-Object -First 6 | ForEach-Object { $_.DisplayName }) -join '; '))
+        }
+
+        Say '--- Volume Shadow Copy (VSS)'
+        $vss = @(& vssadmin.exe list writers 2>&1 | ForEach-Object { [string]$_ })
+        if ($LASTEXITCODE -ne 0 -or $vss.Count -eq 0) {
+            Add-Warning 'vssadmin could not list the VSS writers.'
+        } else {
+            $total = 0; $bad = 0; $current = '?'
+            foreach ($line in $vss) {
+                if ($line -match "^\s*[^:]+:\s*'(.+)'\s*$") { $current = $Matches[1] }
+                elseif ($line -match '^\s*[^:\[\]]+:\s*\[(\d+)\]') {
+                    $total++
+                    if ($Matches[1] -ne '1') { $bad++; Say ("        writer not stable: {0} ({1})" -f $current, $line.Trim()) }
+                }
+            }
+            if ($total -eq 0) { Say '  INFO  The VSS writer list could not be read (unknown output format).' }
+            else              { Write-Check ($bad -eq 0) ("{0} VSS writer(s) checked, {1} not stable" -f $total, $bad) }
+        }
+        Say '  Shadow storage:'
+        (& vssadmin.exe list shadowstorage 2>&1) | ForEach-Object {
+            $l = ([string]$_).Trim()
+            if ($l -match ':') { Say "    $l" }
+        }
+    }
+
+    # ---------------------------------------------------- 17. Server roles check
+    Invoke-Step -Id 17 -Name $Opt.StepNames[16] -Action {
+        function Test-RoleInstalled([string]$Feature, [string]$Service) {
+            if (Get-Command Get-WindowsFeature -ErrorAction SilentlyContinue) {
+                try { $f = Get-WindowsFeature -Name $Feature -ErrorAction Stop; if ($f) { return [bool]$f.Installed } } catch { }
+            }
+            if ($Service) { return [bool](Get-Service $Service -ErrorAction SilentlyContinue) }
+            return $false
+        }
+        function Test-ServiceUp([string]$Name) {
+            $svc = Get-Service $Name -ErrorAction SilentlyContinue
+            if (-not $svc) { Say "  INFO  Service $Name is not installed"; return }
+            Write-Check ($svc.Status -eq 'Running') ("Service {0} ({1}) is {2}" -f $svc.Name, $svc.DisplayName, $svc.Status)
+        }
+        function Show-RecentErrors([string]$Log) {
+            $ev = @(Get-WinEvent -FilterHashtable @{ LogName = $Log; Level = 1, 2; StartTime = (Get-Date).AddDays(-7) } -ErrorAction SilentlyContinue)
+            if ($ev.Count -eq 0) { Say ("  OK    No errors in the '{0}' log in the last 7 days" -f $Log); return }
+            Add-Warning ("{0} error(s) in the '{1}' log in the last 7 days:" -f $ev.Count, $Log)
+            $ev | Group-Object Id | Sort-Object Count -Descending | Select-Object -First 5 | ForEach-Object {
+                $first = ([string]$_.Group[0].Message -split "`r?`n")[0].Trim()
+                if ($first.Length -gt 110) { $first = $first.Substring(0, 110) + '...' }
+                Say ("        {0,4} x event {1}: {2}" -f $_.Count, $_.Name, $first)
+            }
+        }
+
+        $roles = [ordered]@{}
+        $roles['AD DS']               = ((Test-RoleInstalled 'AD-Domain-Services' 'NTDS') -or [bool]$Opt.IsDomainController)
+        $roles['DNS']                 = Test-RoleInstalled 'DNS' 'DNS'
+        $roles['DHCP']                = Test-RoleInstalled 'DHCP' 'DHCPServer'
+        $roles['IIS']                 = Test-RoleInstalled 'Web-Server' 'W3SVC'
+        $roles['Hyper-V']             = Test-RoleInstalled 'Hyper-V' 'vmms'
+        $roles['Failover Clustering'] = Test-RoleInstalled 'Failover-Clustering' 'ClusSvc'
+        $found = @($roles.Keys | Where-Object { $roles[$_] })
+        if ($found.Count -eq 0) {
+            Say 'No known roles found (AD DS, DNS, DHCP, IIS, Hyper-V, Failover Clustering).'
+            return
+        }
+        Say ("Roles found: {0}" -f ($found -join ', '))
+
+        if ($roles['AD DS']) {
+            Say '--- Active Directory Domain Services'
+            try {
+                foreach ($n in 'NTDS', 'Netlogon', 'KDC', 'W32Time', 'ADWS', 'DFSR') { Test-ServiceUp $n }
+                if (Get-Command Get-SmbShare -ErrorAction SilentlyContinue) {
+                    $shares = @(Get-SmbShare -Name SYSVOL, NETLOGON -ErrorAction SilentlyContinue)
+                    Write-Check ($shares.Count -eq 2) 'The SYSVOL and NETLOGON shares exist'
+                }
+                if (Get-Command dcdiag.exe -ErrorAction SilentlyContinue) {
+                    Say '  Running dcdiag /q (this can take a few minutes)...'
+                    $dc = @(& dcdiag.exe /q 2>&1 | ForEach-Object { [string]$_ } | Where-Object { $_.Trim() })
+                    if ($dc.Count -eq 0) { Say '  OK    dcdiag found no problems' }
+                    else {
+                        Add-Warning ("dcdiag reported {0} line(s):" -f $dc.Count)
+                        $dc | Select-Object -First 25 | ForEach-Object { Say "        $_" }
+                    }
+                }
+                $replDone = $false
+                if (Get-Command Get-ADReplicationFailure -ErrorAction SilentlyContinue) {
+                    try {
+                        $fails = @(Get-ADReplicationFailure -Target $env:COMPUTERNAME -Scope Server -ErrorAction Stop)
+                        $replDone = $true
+                        if ($fails.Count -eq 0) { Say '  OK    No replication failures are recorded' }
+                        else {
+                            Add-Warning ("{0} replication failure(s):" -f $fails.Count)
+                            $fails | Select-Object -First 10 | ForEach-Object { Say ("        partner {0}: {1} failure(s), last error {2}" -f $_.Partner, $_.FailureCount, $_.LastError) }
+                        }
+                    } catch { }
+                }
+                if (-not $replDone -and (Get-Command repadmin.exe -ErrorAction SilentlyContinue)) {
+                    Say '  repadmin /replsummary:'
+                    & repadmin.exe /replsummary 2>&1 | ForEach-Object { $l = ([string]$_).TrimEnd(); if ($l) { Say "    $l" } }
+                }
+                if (Get-Command netdom.exe -ErrorAction SilentlyContinue) {
+                    Say '  Operations master (FSMO) roles:'
+                    & netdom.exe query fsmo 2>&1 | ForEach-Object { $l = ([string]$_).TrimEnd(); if ($l) { Say "    $l" } }
+                }
+                Show-RecentErrors 'Directory Service'
+                Show-RecentErrors 'DFS Replication'
+            } catch { Add-Warning "The AD DS check failed: $($_.Exception.Message)" }
+        }
+
+        if ($roles['DNS']) {
+            Say '--- DNS Server'
+            try {
+                Test-ServiceUp 'DNS'
+                if (Get-Command Get-DnsServerZone -ErrorAction SilentlyContinue) {
+                    $zones = @(Get-DnsServerZone -ErrorAction Stop | Where-Object { -not $_.IsAutoCreated })
+                    Say ("  {0} zone(s):" -f $zones.Count)
+                    $zones | Select-Object -First 15 | ForEach-Object {
+                        Say ("    {0} ({1}{2}, dynamic update: {3})" -f $_.ZoneName, $_.ZoneType, $(if ($_.IsDsIntegrated) { ', AD-integrated' } else { '' }), $_.DynamicUpdate)
+                    }
+                    Write-Check (@($zones | Where-Object { $_.IsPaused }).Count -eq 0) 'No zone is paused'
+                }
+                if (Get-Command Get-DnsServerForwarder -ErrorAction SilentlyContinue) {
+                    $fw = Get-DnsServerForwarder -ErrorAction SilentlyContinue
+                    if ($fw -and $fw.IPAddress) { Say ("  Forwarders: {0}" -f (@($fw.IPAddress) -join ', ')) }
+                    else                        { Say '  Forwarders: none (root hints are used)' }
+                }
+                $cs = Get-CimInstance Win32_ComputerSystem
+                if ($cs.PartOfDomain) {
+                    $ok = $true
+                    try { [void](Resolve-DnsName -Name $cs.Domain -Server 127.0.0.1 -ErrorAction Stop) } catch { $ok = $false }
+                    Write-Check $ok ("This server resolves {0} by itself" -f $cs.Domain)
+                }
+                Show-RecentErrors 'DNS Server'
+            } catch { Add-Warning "The DNS check failed: $($_.Exception.Message)" }
+        }
+
+        if ($roles['DHCP']) {
+            Say '--- DHCP Server'
+            try {
+                Test-ServiceUp 'DHCPServer'
+                if (Get-Command Get-DhcpServerv4Scope -ErrorAction SilentlyContinue) {
+                    $scopes = @(Get-DhcpServerv4Scope -ErrorAction Stop)
+                    Say ("  {0} IPv4 scope(s)" -f $scopes.Count)
+                    foreach ($sc in $scopes) {
+                        $st = Get-DhcpServerv4ScopeStatistics -ScopeId $sc.ScopeId -ErrorAction SilentlyContinue
+                        if ($st) { Write-Check ([double]$st.PercentageInUse -lt 90) ("Scope {0} ({1}): {2:N0}% of the addresses are in use" -f $sc.ScopeId, $sc.Name, [double]$st.PercentageInUse) }
+                    }
+                }
+                if (Get-Command Get-DhcpServerInDC -ErrorAction SilentlyContinue) {
+                    try {
+                        $mine = @(Get-DhcpServerInDC -ErrorAction Stop | Where-Object { $_.DnsName -like "$env:COMPUTERNAME*" })
+                        Write-Check ($mine.Count -gt 0) 'This DHCP server is authorized in Active Directory'
+                    } catch { Say '  INFO  Authorization in Active Directory could not be checked.' }
+                }
+            } catch { Add-Warning "The DHCP check failed: $($_.Exception.Message)" }
+        }
+
+        if ($roles['IIS']) {
+            Say '--- Web Server (IIS)'
+            try {
+                Test-ServiceUp 'W3SVC'
+                Import-Module WebAdministration -ErrorAction Stop
+                foreach ($site in @(Get-Website)) { Say ("  Site {0}: {1}" -f $site.Name, $site.State) }
+                $notStarted = @(Get-Website | Where-Object { [string]$_.State -ne 'Started' })
+                if ($notStarted.Count -gt 0) { Say ("  INFO  {0} site(s) are not started (this can be intentional)" -f $notStarted.Count) }
+                $pools    = @(Get-ChildItem IIS:\AppPools -ErrorAction Stop)
+                $badPools = @($pools | Where-Object { [string]$_.State -ne 'Started' })
+                Write-Check ($badPools.Count -eq 0) ("{0} application pool(s), {1} not started" -f $pools.Count, $badPools.Count)
+                foreach ($pool in $badPools) { Say ("        pool {0}: {1}" -f $pool.Name, $pool.State) }
+                $logRoot = "$env:SystemDrive\inetpub\logs\LogFiles"
+                if (Test-Path -LiteralPath $logRoot) { Say ("  IIS log folder size: {0}" -f (Format-Bytes (Get-FolderBytes $logRoot))) }
+            } catch { Add-Warning "The IIS check failed: $($_.Exception.Message)" }
+        }
+
+        if ($roles['Hyper-V']) {
+            Say '--- Hyper-V'
+            try {
+                Test-ServiceUp 'vmms'
+                $vms = @(Get-VM -ErrorAction Stop)
+                Say ("  {0} virtual machine(s)" -f $vms.Count)
+                foreach ($vm in $vms) {
+                    Say ("    {0}: {1}, {2}" -f $vm.Name, $vm.State, $vm.Status)
+                    if ([string]$vm.State -eq 'Running' -and [string]$vm.PrimaryOperationalStatus -ne 'Ok') {
+                        Add-Warning ("VM {0} is not healthy: {1}" -f $vm.Name, $vm.Status)
+                    }
+                }
+                $oldChk = @(Get-VMSnapshot -VMName * -ErrorAction SilentlyContinue | Where-Object { $_.CreationTime -lt (Get-Date).AddDays(-7) })
+                Write-Check ($oldChk.Count -eq 0) ("{0} checkpoint(s) older than 7 days" -f $oldChk.Count)
+            } catch { Add-Warning "The Hyper-V check failed: $($_.Exception.Message)" }
+        }
+
+        if ($roles['Failover Clustering']) {
+            Say '--- Failover Cluster'
+            try {
+                Test-ServiceUp 'ClusSvc'
+                Import-Module FailoverClusters -ErrorAction Stop
+                foreach ($n in @(Get-ClusterNode -ErrorAction Stop)) { Write-Check ([string]$n.State -eq 'Up') ("Node {0} is {1}" -f $n.Name, $n.State) }
+                $grp = @(Get-ClusterGroup -ErrorAction Stop | Where-Object { [string]$_.State -ne 'Online' })
+                Write-Check ($grp.Count -eq 0) ("{0} cluster group(s) are not online" -f $grp.Count)
+                foreach ($g in $grp) { Say ("        {0}: {1}" -f $g.Name, $g.State) }
+                $failedRes = @(Get-ClusterResource -ErrorAction SilentlyContinue | Where-Object { [string]$_.State -eq 'Failed' })
+                Write-Check ($failedRes.Count -eq 0) ("{0} cluster resource(s) have failed" -f $failedRes.Count)
+                $quorum = Get-ClusterQuorum -ErrorAction SilentlyContinue
+                if ($quorum) { Say ("  Quorum type: {0}" -f $quorum.QuorumType) }
+            } catch { Add-Warning "The cluster check failed: $($_.Exception.Message)" }
+        }
+        Say 'Role checks finished.'
+    }
+
+    # ---------------------------------------------------- 18. Storage health
+    Invoke-Step -Id 18 -Name $Opt.StepNames[17] -Action {
+        Say '--- Storage pools and virtual disks'
+        $pools = @(Get-StoragePool -IsPrimordial $false -ErrorAction SilentlyContinue)
+        if ($pools.Count -eq 0) { Say '  No Storage Spaces pools on this server.' }
+        foreach ($pool in $pools) {
+            Write-Check ([string]$pool.HealthStatus -eq 'Healthy') ("Pool {0}: {1} / {2}" -f $pool.FriendlyName, $pool.HealthStatus, $pool.OperationalStatus)
+        }
+        foreach ($vd in @(Get-VirtualDisk -ErrorAction SilentlyContinue)) {
+            Write-Check ([string]$vd.HealthStatus -eq 'Healthy') ("Virtual disk {0} ({1}, {2}): {3} / {4}" -f $vd.FriendlyName, $vd.ResiliencySettingName, (Format-Bytes $vd.Size), $vd.HealthStatus, $vd.OperationalStatus)
+        }
+        Say '--- Physical disks'
+        foreach ($d in @(Get-PhysicalDisk -ErrorAction SilentlyContinue)) {
+            Write-Check ([string]$d.HealthStatus -eq 'Healthy') ("{0} ({1}, {2}): {3} / {4}" -f $d.FriendlyName, $d.MediaType, (Format-Bytes $d.Size), $d.HealthStatus, $d.OperationalStatus)
+        }
+        Say '--- Volumes'
+        foreach ($v in @(Get-Volume -ErrorAction SilentlyContinue | Where-Object { $_.DriveType -eq 'Fixed' })) {
+            $label = if ($v.DriveLetter) { "$($v.DriveLetter):" } else { [string]$v.FileSystemLabel }
+            Write-Check ([string]$v.HealthStatus -eq 'Healthy') ("Volume {0}: {1}" -f $label, $v.HealthStatus)
+        }
+        $jobs = @(Get-StorageJob -ErrorAction SilentlyContinue | Where-Object { [string]$_.JobState -ne 'Completed' })
+        if ($jobs.Count -gt 0) {
+            Say ("  INFO  {0} storage job(s) are running (for example a repair or rebuild):" -f $jobs.Count)
+            foreach ($j in $jobs) { Say ("        {0}: {1}%" -f $j.Name, $j.PercentComplete) }
+        }
+    }
+
+    # ---------------------------------------------------- 19. Server cleanup
+    Invoke-Step -Id 19 -Name $Opt.StepNames[18] -Action {
+        if ($Opt.ServerCleanComponents) {
+            if ($Opt.Preview) {
+                Say 'Preview: analyzing the component store (nothing is removed):'
+                DISM /Online /Cleanup-Image /AnalyzeComponentStore
+            } else {
+                Say 'Cleaning the Windows component store (DISM /StartComponentCleanup, without /ResetBase)...'
+                DISM /Online /Cleanup-Image /StartComponentCleanup
+                if ($LASTEXITCODE -ne 0) { throw "DISM StartComponentCleanup exited with code $LASTEXITCODE" }
+            }
+        }
+        if ($Opt.ServerCleanWuCache) { Clear-WuDownloadCache }
+        if ($Opt.ServerCleanTemp) {
+            $days   = [math]::Max(1, [int]$Opt.TempDays)
+            $cutoff = (Get-Date).AddDays(-$days)
+            foreach ($path in @($env:TEMP, "$env:SystemRoot\Temp") | Select-Object -Unique) {
+                if (-not $path -or -not (Test-SafeTempRoot $path)) { continue }
+                Say "Scanning $path (files created AND modified more than $days day(s) ago)..."
+                Remove-Scanned (Get-TempContents -Root $path -Cutoff $cutoff) $cutoff
+            }
+        }
+        $iisDays = [int]$Opt.IisLogDays
+        if ($iisDays -gt 0) {
+            # Only *.log files inside the W3SVC/FTPSVC site folders and HTTPERR. Event logs (.evtx) are never touched.
+            $iisCut = (Get-Date).AddDays(-$iisDays)
+            $bases  = New-Object System.Collections.Generic.List[string]
+            $bases.Add("$env:SystemDrive\inetpub\logs\LogFiles")
+            try {
+                Import-Module WebAdministration -ErrorAction Stop
+                foreach ($site in @(Get-Website)) {
+                    $dir = [Environment]::ExpandEnvironmentVariables([string]$site.logFile.directory)
+                    if ($dir -and -not $bases.Contains($dir)) { $bases.Add($dir) }
+                }
+            } catch { }
+            $targets = New-Object System.Collections.Generic.List[string]
+            foreach ($b in $bases) {
+                if (-not (Test-PlainFolder $b)) { continue }
+                foreach ($d in @(Get-ChildItem -LiteralPath $b -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^(W3SVC|FTPSVC)\d+$' })) {
+                    if (Test-PlainFolder $d.FullName) { $targets.Add($d.FullName) }
+                }
+            }
+            $httperr = "$env:SystemRoot\System32\LogFiles\HTTPERR"
+            if (Test-PlainFolder $httperr) { $targets.Add($httperr) }
+            Say ("IIS and HTTP.sys logs older than {0} days ({1} folder(s)):" -f $iisDays, $targets.Count)
+            $merged = [pscustomobject]@{
+                Files = (New-Object System.Collections.Generic.List[System.IO.FileInfo])
+                Dirs  = (New-Object System.Collections.Generic.List[System.IO.DirectoryInfo])
+                Links = 0
+            }
+            foreach ($t in $targets) {
+                $one = Get-TempContents -Root $t -Cutoff $iisCut
+                foreach ($f in $one.Files) { if ($f.Extension -eq '.log') { $merged.Files.Add($f) } }
+                $merged.Links += $one.Links
+            }
+            Remove-Scanned $merged ([datetime]::MinValue)
+        }
     }
 
     # ---------------------------------------------------- Summary
@@ -1209,6 +1689,7 @@ public static extern int SRRemoveRestorePoint(int dwRPNum);
     }
     Say ("Total time : {0}" -f $elapsedText)
     Say ("Space freed: {0:N2} GB" -f $freed)
+    if ($State.Warnings -gt 0) { Say ("Warnings   : {0} (look for WARN lines above)" -f $State.Warnings) }
 
     $failedCount   = @($State.Results | Where-Object { $_.Status -eq 'Failed' }).Count
     $rebootPending = [bool]((Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') -or
@@ -1223,20 +1704,54 @@ public static extern int SRRemoveRestorePoint(int dwRPNum);
             Say "WARNING: could not write the report: $($_.Exception.Message)"
         }
     }
-    Say ("@@DONE|{0:N2}|{1}|{2}|{3}|{4}|{5}|{6}|{7}" -f $freed, $elapsedText, $failedCount, $rebootPending, $State.Cancelled, $State.Aborted, $State.Unavail, $reportPath)
+    Say ("@@DONE|{0:N2}|{1}|{2}|{3}|{4}|{5}|{6}|{7}|{8}" -f $freed, $elapsedText, $failedCount, $rebootPending, $State.Cancelled, $State.Aborted, $State.Unavail, $reportPath, $State.Warnings)
 }
 
 # =============================================================================
-#  UNATTENDED MODE (no window): -All, -Steps, -Skip...
+#  SHARED BY THE WINDOW, THE TEXT MENU AND -Schedule
 # =============================================================================
-if ($headless) {
-    # Turn off console QuickEdit so clicking in the window can't pause the run
+$script:TaskName = 'PC Maintenance (weekly)'
+
+function Get-MaintTask { return (Get-ScheduledTask -TaskName $script:TaskName -ErrorAction SilentlyContinue) }
+
+function Remove-MaintTask { Unregister-ScheduledTask -TaskName $script:TaskName -Confirm:$false -ErrorAction Stop }
+
+# Creates or replaces the weekly task. On a PC it runs as you (only when you are logged on),
+# on a server as SYSTEM (also when nobody is logged on). $AllowChanges adds -MaintenanceWindow.
+function Install-MaintTask([string]$Day, [datetime]$Time, [string]$PresetName, [bool]$AllowChanges) {
+    # The task runs a copy kept in Program Files (writable by administrators only),
+    # never a file from a folder an ordinary user could change.
+    if (-not $PSCommandPath) { throw 'The script path is unknown.' }
+    $destDir = Join-Path $env:ProgramFiles 'PCMaintenance'
+    New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+    $dest = Join-Path $destDir 'Run-Maintenance.ps1'
+    if ($PSCommandPath -ne $dest) { Copy-Item -LiteralPath $PSCommandPath -Destination $dest -Force }
+    $arg = "-NoProfile -ExecutionPolicy Bypass -File `"$dest`" -Preset $PresetName -SilentWinget"
+    if ($AllowChanges) { $arg += ' -MaintenanceWindow' }
+    $action   = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arg
+    $trigger  = New-ScheduledTaskTrigger -Weekly -DaysOfWeek $Day -At ([datetime]::Today.Add($Time.TimeOfDay))
+    $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Hours 6)
+    if ($RunMode -eq 'Server') {
+        $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+    } else {
+        $settings.DisallowStartIfOnBatteries = $true    # laptops only run it on the charger
+        $settings.StopIfGoingOnBatteries     = $false   # the tool checks power itself between steps
+        $who       = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+        $principal = New-ScheduledTaskPrincipal -UserId $who -LogonType Interactive -RunLevel Highest
+    }
+    Register-ScheduledTask -TaskName $script:TaskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
+}
+
+# Turns off console QuickEdit so clicking in the console can't pause a run
+function Disable-QuickEdit {
     try {
-        Add-Type -Namespace Native -Name ConsoleMode -MemberDefinition @'
+        if (-not ('Native.ConsoleMode' -as [type])) {
+            Add-Type -Namespace Native -Name ConsoleMode -MemberDefinition @'
 [DllImport("kernel32.dll")] public static extern IntPtr GetStdHandle(int nStdHandle);
 [DllImport("kernel32.dll")] public static extern bool GetConsoleMode(IntPtr hConsoleHandle, out uint lpMode);
 [DllImport("kernel32.dll")] public static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
 '@
+        }
         $hIn = [Native.ConsoleMode]::GetStdHandle(-10)
         [uint32]$consoleMode = 0
         if ([Native.ConsoleMode]::GetConsoleMode($hIn, [ref]$consoleMode)) {
@@ -1244,7 +1759,176 @@ if ($headless) {
             [void][Native.ConsoleMode]::SetConsoleMode($hIn, $newMode)
         }
     } catch { }
+}
 
+# Runs the engine in this console and writes the log. Returns ExitCode and Finished.
+#   0 = fine, 1 = warnings (stopped, skipped steps or WARN lines), 2 = failures
+function Invoke-ConsoleRun($RunOpt) {
+    Disable-QuickEdit
+    Remove-Item -LiteralPath $CancelFile -Force -ErrorAction SilentlyContinue
+    $logFile = Open-RunLog
+    $script:DoneInfo = $null
+    Write-Host "PC Maintenance - log file: $logFile"
+    try {
+        & $Engine $RunOpt | ForEach-Object {
+            $line = [string]$_
+            if ($line.StartsWith('@@')) {
+                $p = $line.Split('|')
+                if ($p[0] -eq '@@DONE') { $script:DoneInfo = $p; return }
+                $text = Format-MarkerText $p
+                Write-LogLine $text
+                if ($p[2] -eq 'START') {
+                    Write-Host ""
+                    Write-Host $text -ForegroundColor Cyan
+                } elseif ($p[3] -eq 'Failed') {
+                    Write-Host $text -ForegroundColor Red
+                } else {
+                    Write-Host $text -ForegroundColor Green
+                }
+            } else {
+                Write-LogLine $line
+                if ($line -match '^\s+WARN\s') { Write-Host $line -ForegroundColor Yellow } else { Write-Host $line }
+            }
+        }
+    } finally {
+        Close-RunLog
+    }
+
+    $exitCode = 2
+    $finished = $false
+    if ($script:DoneInfo) {
+        $d = $script:DoneInfo
+        $warnings = 0
+        if ($d.Count -gt 9) { $warnings = [int]$d[9] }
+        $finished = ($d[5] -ne 'True' -and $d[6] -ne 'True')
+        if ([int]$d[3] -gt 0 -or $d[6] -eq 'True') { $exitCode = 2 }
+        elseif ($d[5] -eq 'True' -or [int]$d[7] -gt 0 -or $warnings -gt 0) { $exitCode = 1 }
+        else { $exitCode = 0 }
+        if ($d[4] -eq 'True') { Write-Host "A reboot is pending." -ForegroundColor Yellow }
+        if ($warnings -gt 0)  { Write-Host "$warnings warning(s) found - see the WARN lines or the report." -ForegroundColor Yellow }
+        if ($d.Count -gt 8 -and $d[8]) { Write-Host "Report: $($d[8])" }
+    }
+    return [pscustomobject]@{ ExitCode = $exitCode; Finished = $finished }
+}
+
+# ----- text menu (Server Core has no desktop for the window; -Menu asks for it on purpose)
+function Read-YesNo([string]$Prompt) {
+    $a = (Read-Host "$Prompt [y/N]").Trim().ToLower()
+    return ($a -eq 'y' -or $a -eq 'yes')
+}
+
+function Start-MenuRun([int[]]$Ids, [bool]$AsPreview) {
+    if ($Ids.Count -eq 0) { Write-Host 'Nothing to run.' -ForegroundColor Yellow; return }
+    $o = New-RunOptions
+    $o.Steps   = [int[]]$Ids
+    $o.Preview = $AsPreview
+    $needs = @($Ids | Where-Object { $Gated -contains $_ -and -not ($_ -eq 7 -and $o.OptimizeAction -eq 'Analyze') })
+    if (-not $AsPreview -and -not $o.MaintenanceWindow -and $needs.Count -gt 0) {
+        Write-Host ("Step(s) {0} change this server." -f ($needs -join ', ')) -ForegroundColor Yellow
+        Write-Host 'Only continue in a planned maintenance window, with a recent backup.' -ForegroundColor Yellow
+        if ((Read-Host 'Type YES if this is a maintenance window') -ceq 'YES') { $o.MaintenanceWindow = $true }
+        else { Write-Host 'Those steps will be skipped.' }
+    }
+    $r = @(Invoke-ConsoleRun $o)[-1]
+    Write-Host ''
+    Write-Host "Finished. The exit code would be $($r.ExitCode) (0 fine, 1 warnings, 2 failures)."
+    [void](Read-Host 'Press Enter to go back to the menu')
+}
+
+function Show-ConsoleMenu {
+    while ($true) {
+        Write-Host ''
+        Write-Host "PC Maintenance - $ModeLabel mode" -ForegroundColor Cyan
+        Write-Host $SystemInfo.Text
+        if ($RunMode -eq 'Server') { Write-Host ' 1  Run the server check (read-only)' } else { Write-Host ' 1  Run the default steps' }
+        Write-Host ' 2  Choose the steps to run'
+        Write-Host ' 3  Preview what cleanup would remove'
+        Write-Host ' 4  Schedule a weekly run'
+        Write-Host ' 5  Remove the weekly schedule'
+        Write-Host ' 6  Show where logs and reports are saved'
+        Write-Host ' Q  Quit'
+        $choice = (Read-Host 'Choose').Trim().ToLower()
+        switch ($choice) {
+            '1' {
+                if ($RunMode -eq 'Server') { $ids = @($Presets.ServerCheck) } else { $ids = @($ModeDefaultIds) }
+                Start-MenuRun @($ids | Where-Object { $ModeStepIds -contains $_ }) $false
+            }
+            '2' {
+                foreach ($si in $StepInfo) {
+                    $id = [int]$si.Id
+                    if ($ModeStepIds -notcontains $id) { continue }
+                    $tag = ''
+                    if ($Unavailable.ContainsKey($id))   { $tag = '   [not available: ' + $Unavailable[$id] + ']' }
+                    elseif ($Gated -contains $id)        { $tag = '   [needs a maintenance window]' }
+                    elseif ($si.Risk -eq 'Deletes')      { $tag = '   [deletes files]' }
+                    Write-Host ('{0,3}  {1}{2}' -f $id, $si.Title, $tag)
+                }
+                $txt = Read-Host 'Steps to run, for example 8,15-18 (empty = back)'
+                if ($txt.Trim()) {
+                    $sel = Resolve-StepSelection $txt $StepInfo.Count
+                    if (-not $sel) { Write-Host 'That is not a valid list of step numbers.' -ForegroundColor Red }
+                    else           { Start-MenuRun @($sel | Where-Object { $ModeStepIds -contains $_ }) $false }
+                }
+            }
+            '3' {
+                Start-MenuRun @($PreviewIds | Where-Object { $ModeStepIds -contains $_ }) $true
+            }
+            '4' {
+                $day = (Read-Host 'Day of the week [Sunday]').Trim()
+                if (-not $day) { $day = 'Sunday' }
+                $dayOk = @([System.Enum]::GetNames([System.DayOfWeek]) | Where-Object { $_ -ieq $day })
+                if ($dayOk.Count -eq 0) { Write-Host 'That is not a day of the week (use English names).' -ForegroundColor Red; break }
+                $time = (Read-Host 'Time as HH:mm [03:00]').Trim()
+                if (-not $time) { $time = '03:00' }
+                try { $when = [datetime]::ParseExact($time, 'HH:mm', [System.Globalization.CultureInfo]::InvariantCulture) }
+                catch { Write-Host 'That is not a time like 03:00.' -ForegroundColor Red; break }
+                if ($RunMode -eq 'Server') { $def = 'ServerCheck' } else { $def = 'WeeklySafe' }
+                $pre = (Read-Host ("What to run: {0} [{1}]" -f (@($Presets.Keys) -join ', '), $def)).Trim()
+                if (-not $pre) { $pre = $def }
+                $preOk = @($Presets.Keys | Where-Object { $_ -ieq $pre })
+                if ($preOk.Count -eq 0) { Write-Host 'That is not one of the presets.' -ForegroundColor Red; break }
+                $allow = Read-YesNo 'Allow steps that change the system in the scheduled run (a standing maintenance window)?'
+                try {
+                    Install-MaintTask $dayOk[0] $when $preOk[0] $allow
+                    Write-Host "Scheduled '$($script:TaskName)' every $($dayOk[0]) at $time (preset $($preOk[0]))." -ForegroundColor Green
+                } catch { Write-Host "The schedule could not be created: $($_.Exception.Message)" -ForegroundColor Red }
+            }
+            '5' {
+                try { Remove-MaintTask; Write-Host 'The weekly schedule was removed.' -ForegroundColor Green }
+                catch { Write-Host 'There was no schedule to remove.' }
+            }
+            '6' { Write-Host "Logs and reports are saved in: $LogDir" }
+            'q' { return }
+            default { Write-Host 'Please type a number from the list, or Q.' }
+        }
+    }
+}
+
+# =============================================================================
+#  -Schedule / -RemoveSchedule (no window, no run)
+# =============================================================================
+if ($Schedule -or $RemoveSchedule) {
+    try {
+        if ($RemoveSchedule) {
+            Remove-MaintTask
+            Write-Host 'The weekly schedule was removed.'
+        } else {
+            if ($Preset) { $presetName = $Preset } elseif ($RunMode -eq 'Server') { $presetName = 'ServerCheck' } else { $presetName = 'WeeklySafe' }
+            $when = [datetime]::ParseExact($ScheduleTime, 'HH:mm', [System.Globalization.CultureInfo]::InvariantCulture)
+            Install-MaintTask $ScheduleDay $when $presetName ([bool]$MaintenanceWindow)
+            Write-Host ("Scheduled '{0}' every {1} at {2} (preset {3}{4})." -f $script:TaskName, $ScheduleDay, $ScheduleTime, $presetName, $(if ($MaintenanceWindow) { ', maintenance window allowed' } else { '' }))
+        }
+        exit 0
+    } catch {
+        Write-Host "The schedule could not be changed: $($_.Exception.Message)" -ForegroundColor Red
+        exit 2
+    }
+}
+
+# =============================================================================
+#  UNATTENDED MODE (no window): -All, -Steps, -Preset, -Preview, -Skip...
+# =============================================================================
+if ($headless) {
     $maxStep = $StepInfo.Count
     $skipped = @()
     if ($SkipRestorePoint) { $skipped += 1 }
@@ -1265,7 +1949,7 @@ if ($headless) {
     } else {
         $selected = $ModeDefaultIds
     }
-    if ($Preview) { $selected = @($selected | Where-Object { @(2, 4, 10) -contains $_ }) }
+    if ($Preview) { $selected = @($selected | Where-Object { $PreviewIds -contains $_ }) }
     $notInMode = @($selected | Where-Object { $ModeStepIds -notcontains $_ })
     if ($notInMode.Count -gt 0) {
         Write-Host "Ignoring step(s) $($notInMode -join ', '): not available in $RunMode mode." -ForegroundColor Yellow
@@ -1276,58 +1960,30 @@ if ($headless) {
         exit
     }
 
-    Remove-Item -LiteralPath $CancelFile -Force -ErrorAction SilentlyContinue
     $runOpt = New-RunOptions
     $runOpt.Steps        = [int[]]$selected
     $runOpt.WingetSilent = [bool]$SilentWinget
     $runOpt.IgnorePower  = [bool]$IgnorePower
     $runOpt.Preview      = [bool]$Preview
-
-    $logFile = Open-RunLog
-    $script:DoneInfo = $null
-    Write-Host "PC Maintenance - log file: $logFile"
-    try {
-        & $Engine $runOpt | ForEach-Object {
-            $line = [string]$_
-            if ($line.StartsWith('@@')) {
-                $p = $line.Split('|')
-                if ($p[0] -eq '@@DONE') { $script:DoneInfo = $p; return }
-                $text = Format-MarkerText $p
-                Write-LogLine $text
-                if ($p[2] -eq 'START') {
-                    Write-Host ""
-                    Write-Host $text -ForegroundColor Cyan
-                } elseif ($p[3] -eq 'Failed') {
-                    Write-Host $text -ForegroundColor Red
-                } else {
-                    Write-Host $text -ForegroundColor Green
-                }
-            } else {
-                Write-LogLine $line
-                Write-Host $line
-            }
-        }
-    } finally {
-        Close-RunLog
+    $needsWindow = @($selected | Where-Object { $Gated -contains $_ -and -not ($_ -eq 7 -and $runOpt.OptimizeAction -eq 'Analyze') })
+    if ($needsWindow.Count -gt 0 -and -not $runOpt.MaintenanceWindow -and -not $Preview) {
+        Write-Host "Step(s) $($needsWindow -join ', ') change the server and will be skipped unless you add -MaintenanceWindow." -ForegroundColor Yellow
     }
 
-    # 0 = fine, 1 = warnings (stopped, or steps this PC cannot run), 2 = failures
-    $exitCode = 2
-    $finished = $false
-    if ($script:DoneInfo) {
-        $d = $script:DoneInfo
-        $finished = ($d[5] -ne 'True' -and $d[6] -ne 'True')
-        if ([int]$d[3] -gt 0 -or $d[6] -eq 'True') { $exitCode = 2 }
-        elseif ($d[5] -eq 'True' -or [int]$d[7] -gt 0) { $exitCode = 1 }
-        else { $exitCode = 0 }
-        if ($d[4] -eq 'True') { Write-Host "A reboot is pending." -ForegroundColor Yellow }
-        if ($d.Count -gt 8 -and $d[8]) { Write-Host "Report: $($d[8])" }
-    }
-    if ($Reboot -and $finished) {
+    $res = @(Invoke-ConsoleRun $runOpt)[-1]
+    if ($Reboot -and $res.Finished) {
         Write-Host "Restarting in 30 seconds (run 'shutdown /a' to cancel)..."
         & shutdown.exe /r /t 30 /c "PC Maintenance finished - restarting"
     }
-    exit $exitCode
+    exit $res.ExitCode
+}
+
+# =============================================================================
+#  TEXT MENU: Server Core has no desktop, so the window cannot open there
+# =============================================================================
+if ($Menu -or $SystemInfo.InstallType -eq 'Server Core') {
+    Show-ConsoleMenu
+    exit 0
 }
 
 # =============================================================================
@@ -1434,6 +2090,39 @@ try {
     # ----- translations: English text -> Dutch. The log files stay English.
     #       (Dutch text here is ASCII only on purpose, see CLAUDE.md.)
     $script:NL = @{
+        '1 to 3 minutes' = '1 tot 3 minuten'
+        '180 days' = '180 dagen'
+        '365 days' = '365 dagen'
+        '90 days (recommended)' = '90 dagen (aanbevolen)'
+        'Allow changes in the scheduled run (maintenance window)' = 'Wijzigingen toestaan in de geplande run (onderhoudsvenster)'
+        'Analyze only (nothing is changed, recommended on a server)' = 'Alleen analyseren (er wordt niets gewijzigd, aanbevolen op een server)'
+        'Check storage pools, disks and volumes' = 'Opslagpools, schijven en volumes controleren'
+        'Check the backups' = 'De back-ups controleren'
+        'Check the health of this server' = 'Gezondheid van deze server controleren'
+        'Check the installed server roles' = ('De ge' + [char]0xEF + 'nstalleerde serverrollen controleren')
+        'Clean up this server' = 'Deze server opschonen'
+        'Cleans the Windows component store (without /ResetBase), the Windows Update download cache, old temp files and old IIS logs. Event logs are never touched. Needs a maintenance window and is off by default.' = 'Ruimt de Windows-componentenopslag op (zonder /ResetBase), de downloadcache van Windows Update, oude tijdelijke bestanden en oude IIS-logs. Gebeurtenislogs blijven altijd ongemoeid. Vereist een onderhoudsvenster en staat standaard uit.'
+        'Component store (DISM):' = 'Componentenopslag (DISM):'
+        'Delete IIS logs older than:' = 'IIS-logs wissen die ouder zijn dan:'
+        'Finds the installed roles and checks them: Active Directory (dcdiag, replication, SYSVOL), DNS, DHCP, IIS, Hyper-V and failover clustering. Report only.' = ('Zoekt de ge' + [char]0xEF + 'nstalleerde rollen en controleert ze: Active Directory (dcdiag, replicatie, SYSVOL), DNS, DHCP, IIS, Hyper-V en failover clustering. Alleen een rapport.')
+        'Finished, with warnings' = 'Klaar, met waarschuwingen'
+        'Health of Storage Spaces pools and virtual disks, physical disks and volumes, and running repair jobs. Report only.' = 'Gezondheid van Storage Spaces-pools en virtuele schijven, fysieke schijven en volumes, en lopende herstelopdrachten. Alleen een rapport.'
+        'Is this a maintenance window?' = 'Is dit een onderhoudsvenster?'
+        'Leave IIS logs alone' = 'IIS-logs met rust laten'
+        'Maintenance window' = 'Onderhoudsvenster'
+        'Old temp files:' = 'Oude tijdelijke bestanden:'
+        'Only continue in a planned maintenance window, with a recent backup.' = 'Ga alleen verder in een gepland onderhoudsvenster, met een recente back-up.'
+        'Optimize: TRIM for SSDs, defrag for hard disks (recommended on a PC)' = 'Optimaliseren: TRIM voor SSD-schijven, defragmenteren voor harde schijven (aanbevolen op een pc)'
+        'Run the checks by itself every week, as SYSTEM, also when nobody is logged on. If the server was off at that time it runs as soon as possible after.' = 'Laat de controles elke week vanzelf lopen, als SYSTEM, ook als er niemand is aangemeld. Stond de server dan uit, dan loopt het zo snel mogelijk daarna.'
+        'Server check' = 'Servercontrole'
+        'Server check (recommended): read-only health checks of the server, backups, roles and storage' = 'Servercontrole (aanbevolen): alleen-lezen controles van de server, back-ups, rollen en opslag'
+        'The preview works for steps 2, 4, 10 and 19. Tick at least one of them.' = ('Het voorbeeld werkt voor stap 2, 4, 10 en 19. Vink er minstens ' + [char]0xE9 + [char]0xE9 + 'n aan.')
+        'These steps change this server: {0}.' = 'Deze stappen wijzigen deze server: {0}.'
+        'Uptime, pending restart, free disk space, automatic services that are not running, critical events, the last installed update, expiring certificates and time synchronization. Report only.' = ('Uptime, openstaande herstart, vrije schijfruimte, automatische services die niet draaien, kritieke gebeurtenissen, de laatst ge' + [char]0xEF + 'nstalleerde update, vervallende certificaten en tijdsynchronisatie. Alleen een rapport.')
+        'Weekly safe: update scan, virus scan, drive analysis, health and security checks' = 'Veilig, wekelijks: updatescan, virusscan, schijfanalyse, gezondheids- en beveiligingscontroles'
+        'What to do:' = 'Wat te doen:'
+        'Windows Server Backup: the last successful backup and its result. Also checks that the VSS writers are stable and shows the shadow storage. Report only.' = 'Windows Server Backup: de laatste geslaagde back-up en het resultaat ervan. Controleert ook of de VSS-writers stabiel zijn en toont de schaduwopslag. Alleen een rapport.'
+        '{0} warning(s) found - see the WARN lines in the technical details or the report.' = '{0} waarschuwing(en) gevonden - zie de WARN-regels in de technische details of het rapport.'
         ' - Windows updates will be downloaded and installed (no automatic restart)' = (' - Windows-updates worden gedownload en ge' + [char]0xEF + 'nstalleerd (zonder automatische herstart)')
         ' - browser, Windows Update and Delivery Optimization caches will be cleared (you stay signed in)' = ' - de caches van browsers, Windows Update en Delivery Optimization worden gewist (je blijft aangemeld)'
         ' - keep the charger connected (laptops)' = ' - laat de lader aangesloten (laptops)'
@@ -1621,7 +2310,6 @@ try {
         'The icon cache was rebuilt.' = 'De pictogramcache is opnieuw opgebouwd.'
         'The maintenance did not finish properly. Tick "Show technical details" to see what happened.' = 'Het onderhoud is niet goed afgerond. Vink "Technische details tonen" aan om te zien wat er gebeurde.'
         'The network settings were reset. Please restart your PC to finish.' = 'De netwerkinstellingen zijn gereset. Herstart je pc om af te ronden.'
-        'The preview works for steps 2, 4 and 10. Tick at least one of them.' = ('Het voorbeeld werkt voor stap 2, 4 en 10. Vink er minstens ' + [char]0xE9 + [char]0xE9 + 'n aan.')
         'The print spooler was restarted and stuck print jobs were removed.' = 'De afdrukwachtrij is herstart en vastgelopen afdrukopdrachten zijn verwijderd.'
         'The schedule could not be created:' = 'De planning kon niet worden gemaakt:'
         'The search index will be rebuilt. Search results can be incomplete for a while.' = 'De zoekindex wordt opnieuw opgebouwd. Zoekresultaten kunnen een tijdje onvolledig zijn.'
@@ -2129,29 +2817,7 @@ try {
         [void]$dlg.ShowDialog($form)
     }
 
-    # ----- weekly schedule (scheduled task)
-    $script:TaskName = 'PC Maintenance (weekly)'
-
-    function Get-MaintTask { return (Get-ScheduledTask -TaskName $script:TaskName -ErrorAction SilentlyContinue) }
-
-    function Install-MaintTask([string]$Day, [datetime]$Time, [string]$PresetName) {
-        # The task runs a copy kept in Program Files (writable by administrators only),
-        # never a file from a folder an ordinary user could change.
-        if (-not $PSCommandPath) { throw 'The script path is unknown.' }
-        $destDir = Join-Path $env:ProgramFiles 'PCMaintenance'
-        New-Item -ItemType Directory -Path $destDir -Force | Out-Null
-        $dest = Join-Path $destDir 'Run-Maintenance.ps1'
-        if ($PSCommandPath -ne $dest) { Copy-Item -LiteralPath $PSCommandPath -Destination $dest -Force }
-        $arg      = "-NoProfile -ExecutionPolicy Bypass -File `"$dest`" -Preset $PresetName -SilentWinget"
-        $action   = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arg
-        $trigger  = New-ScheduledTaskTrigger -Weekly -DaysOfWeek $Day -At ([datetime]::Today.Add($Time.TimeOfDay))
-        $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Hours 6)
-        $settings.DisallowStartIfOnBatteries = $true    # laptops only run it on the charger
-        $settings.StopIfGoingOnBatteries     = $false   # the tool checks power itself between steps
-        $who       = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-        $principal = New-ScheduledTaskPrincipal -UserId $who -LogonType Interactive -RunLevel Highest
-        Register-ScheduledTask -TaskName $script:TaskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
-    }
+    # ----- weekly schedule dialog (the task functions Install-MaintTask etc. are defined above, shared with -Schedule)
 
     function Update-ScheduleStatus {
         $task = Get-MaintTask
@@ -2172,7 +2838,12 @@ try {
         $dlg = New-Dialog (T 'Weekly schedule') 560 380
         $script:Dlg = @{ Form = $dlg }
 
-        $intro = New-Label (T 'Run the maintenance by itself every week. Laptops only start it when the charger is connected. If the PC was off at that time it runs as soon as possible after.') $script:FontNormal $null 520
+        if ($RunMode -eq 'Server') {
+            $introText = T 'Run the checks by itself every week, as SYSTEM, also when nobody is logged on. If the server was off at that time it runs as soon as possible after.'
+        } else {
+            $introText = T 'Run the maintenance by itself every week. Laptops only start it when the charger is connected. If the PC was off at that time it runs as soon as possible after.'
+        }
+        $intro = New-Label $introText $script:FontNormal $null 520
         $intro.Location = New-Object System.Drawing.Point -ArgumentList (S 14), (S 12)
         $dlg.Controls.Add($intro)
 
@@ -2202,10 +2873,17 @@ try {
         $cmbPreset = New-Object System.Windows.Forms.ComboBox
         $cmbPreset.DropDownStyle = 'DropDownList'; $cmbPreset.Width = S 380
         $cmbPreset.Location = New-Object System.Drawing.Point -ArgumentList (S 140), (S $y)
-        $script:Dlg.PresetValues = @('WeeklySafe', 'QuickTuneUp', 'DeepClean')
-        foreach ($pt in @('Weekly safe (recommended): updates, virus scan, drive optimization, health and security checks',
-                          'Quick tune-up: temp files, drive optimization, health report',
-                          'Deep clean: restore point, updates, cleanup, repair, caches')) { [void]$cmbPreset.Items.Add((T $pt)) }
+        if ($RunMode -eq 'Server') {
+            $script:Dlg.PresetValues = @('ServerCheck', 'WeeklySafe')
+            $presetTexts = @('Server check (recommended): read-only health checks of the server, backups, roles and storage',
+                             'Weekly safe: update scan, virus scan, drive analysis, health and security checks')
+        } else {
+            $script:Dlg.PresetValues = @('WeeklySafe', 'QuickTuneUp', 'DeepClean')
+            $presetTexts = @('Weekly safe (recommended): updates, virus scan, drive optimization, health and security checks',
+                             'Quick tune-up: temp files, drive optimization, health report',
+                             'Deep clean: restore point, updates, cleanup, repair, caches')
+        }
+        foreach ($pt in $presetTexts) { [void]$cmbPreset.Items.Add((T $pt)) }
         $cmbPreset.SelectedIndex = 0
         $script:Dlg.Preset = $cmbPreset
 
@@ -2213,6 +2891,15 @@ try {
         $status.Location = New-Object System.Drawing.Point -ArgumentList (S 14), (S 250)
         $script:Dlg.Status = $status
 
+        $script:Dlg.Window = $null
+        if ($RunMode -eq 'Server') {
+            $chkWin = New-Object System.Windows.Forms.CheckBox
+            $chkWin.AutoSize = $true
+            $chkWin.Text     = (T 'Allow changes in the scheduled run (maintenance window)')
+            $chkWin.Location = New-Object System.Drawing.Point -ArgumentList (S 14), (S 222)
+            $script:Dlg.Window = $chkWin
+            $dlg.Controls.Add($chkWin)
+        }
         foreach ($c in @($lblDay, $cmbDay, $lblTime, $dtp, $lblWhat, $cmbPreset, $status)) { $dlg.Controls.Add($c) }
 
         $btnCreate = New-Object System.Windows.Forms.Button
@@ -2222,7 +2909,8 @@ try {
             try {
                 $day = $script:Dlg.DayValues[$script:Dlg.Day.SelectedIndex]
                 $pre = $script:Dlg.PresetValues[$script:Dlg.Preset.SelectedIndex]
-                Install-MaintTask $day $script:Dlg.Time.Value $pre
+                $allow = [bool]($script:Dlg.Window -and $script:Dlg.Window.Checked)
+                Install-MaintTask $day $script:Dlg.Time.Value $pre $allow
                 Update-ScheduleStatus
             } catch {
                 [void](Show-Message ((T 'The schedule could not be created:') + "`r`n" + $_.Exception.Message) (T 'Weekly schedule') 'OK' 'Error')
@@ -2413,9 +3101,10 @@ try {
         $o = New-RunOptions
         $ids = @($script:StepCtl.Keys | Where-Object { $script:StepCtl[$_].Check.Checked -and $script:StepCtl[$_].Check.Enabled } |
                  Sort-Object | ForEach-Object { [int]$_ })
-        if ($Preview) { $ids = @($ids | Where-Object { @(2, 4, 10) -contains $_ }) }
+        if ($Preview) { $ids = @($ids | Where-Object { $PreviewIds -contains $_ }) }
         $o.Steps   = [int[]]$ids
         $o.Preview = [bool]$Preview
+        $o.MaintenanceWindow = ($script:MaintWindow -eq $true) -or [bool]$MaintenanceWindow
         if ($script:WingetPick) { $o.WingetIds = @($script:WingetPick) }
         # Dropdown choices only count while "Show advanced options" is ticked
         if ($script:UI.chkAdv.Checked) {
@@ -2508,7 +3197,8 @@ try {
         $script:UI.btnClose.Enabled   = $true
         $script:UI.lblNow.Text        = ''
         $script:UI.btnReport.Visible  = $false
-        $script:WingetPick = $null
+        $script:WingetPick  = $null
+        $script:MaintWindow = $null
         Update-WingetLabel
 
         $d = $r.Done
@@ -2530,17 +3220,22 @@ try {
         }
 
         $failed = [int]$d[3]
+        $warn = 0
+        if ($d.Count -gt 9) { $warn = [int]$d[9] }
         if ($d[6] -eq 'True') {
             $script:UI.lblTitle.Text = (T 'Stopped: charger not connected'); $script:UI.lblTitle.ForeColor = $script:ColRed
         } elseif ($d[5] -eq 'True') {
             $script:UI.lblTitle.Text = (T 'Stopped as requested'); $script:UI.lblTitle.ForeColor = $script:ColAmber
         } elseif ($failed -gt 0) {
             $script:UI.lblTitle.Text = (T 'Finished, but some steps had problems'); $script:UI.lblTitle.ForeColor = $script:ColAmber
+        } elseif ($warn -gt 0) {
+            $script:UI.lblTitle.Text = (T 'Finished, with warnings'); $script:UI.lblTitle.ForeColor = $script:ColAmber
         } else {
             $script:UI.lblTitle.Text = (T 'All done!'); $script:UI.lblTitle.ForeColor = $script:ColGreen
         }
         $text = ((T 'Space freed: {0} GB      Time taken: {1}') -f $d[1], $d[2])
         if ($failed -gt 0) { $text += "`r`n" + ((T '{0} step(s) failed - tick "Show technical details" to see why.') -f $failed) }
+        if ($warn -gt 0) { $text += "`r`n" + ((T '{0} warning(s) found - see the WARN lines in the technical details or the report.') -f $warn) }
         if ($d[4] -eq 'True') { $text += "`r`n" + (T 'Windows would like a restart to finish some changes.') }
         $script:UI.lblSummary.Text = $text
         if ($d.Count -gt 8 -and $d[8] -and (Test-Path -LiteralPath $d[8])) {
@@ -2682,7 +3377,10 @@ try {
                       Items = @('Full repair: DISM + SFC (recommended)', 'SFC only (faster)', 'DISM only'); Values = @('Both', 'SfcOnly', 'DismOnly'); Default = 0 } )
             6 = @( @{ Key = 'DefenderMode'; Label = 'Scan type:';
                       Items = @('Quick scan (recommended)', 'Update definitions only', 'Full scan (can take hours)'); Values = @('Quick', 'UpdateOnly', 'Full'); Default = 0 } )
-            7 = @( @{ Key = 'OptimizeDrive'; Label = 'Which drives:';
+            7 = @( @{ Key = 'OptimizeAction'; Label = 'What to do:';
+                      Items = @('Optimize: TRIM for SSDs, defrag for hard disks (recommended on a PC)', 'Analyze only (nothing is changed, recommended on a server)');
+                      Values = @('Optimize', 'Analyze'); Default = $(if ($RunMode -eq 'Server') { 1 } else { 0 }) },
+                   @{ Key = 'OptimizeDrive'; Label = 'Which drives:';
                       Items = $driveItems; Values = $driveValues; Default = 0 } )
             8 = @()
             9 = @( @{ Key = 'WindowsUpdateMode'; Label = 'What to do with updates:';
@@ -2698,6 +3396,19 @@ try {
             13 = @( @{ Key = 'DiskScan'; Label = 'Online disk scan:';
                        Items = @('Skip it (recommended)', 'Run a read-only scan of each drive (slow)'); Values = @($false, $true); Default = 0 } )
             14 = @()
+            15 = @()
+            16 = @()
+            17 = @()
+            18 = @()
+            19 = @( @{ Key = 'ServerCleanComponents'; Label = 'Component store (DISM):';
+                       Items = $yesNo; Values = @($true, $false); Default = 0 },
+                    @{ Key = 'ServerCleanWuCache'; Label = 'Windows Update download cache:';
+                       Items = $yesNo; Values = @($true, $false); Default = 0 },
+                    @{ Key = 'ServerCleanTemp'; Label = 'Old temp files:';
+                       Items = $yesNo; Values = @($true, $false); Default = 0 },
+                    @{ Key = 'IisLogDays'; Label = 'Delete IIS logs older than:';
+                       Items = @('Leave IIS logs alone', '30 days', '90 days (recommended)', '180 days', '365 days');
+                       Values = @(0, 30, 90, 180, 365); Default = 2 } )
         }
 
         $script:StepCtl   = @{}     # step id -> controls
@@ -2757,7 +3468,7 @@ try {
         $lblSub.MaximumSize = Sz 770 0
         $lblSub.Margin      = Pd 0 2 0 0
         $lblMode = New-Object System.Windows.Forms.Label
-        $lblMode.Text        = ((T 'Mode: {0}   |   {1}') -f $RunMode, $SystemInfo.Text)
+        $lblMode.Text        = ((T 'Mode: {0}   |   {1}') -f $ModeLabel, $SystemInfo.Text)
         $lblMode.Font        = $script:FontSmall
         $lblMode.ForeColor   = $script:ColMuted
         $lblMode.AutoSize    = $true
@@ -2775,14 +3486,23 @@ try {
         $pnlPre.AutoSize      = $true
         $pnlPre.MaximumSize   = Sz 790 0
         $pnlPre.Margin        = Pd 0 4 0 6
-        foreach ($b in @(
-            @{ Text = 'Select everything';        Mode = 'Skip'; Ids = @() },
-            @{ Text = 'Select nothing';           Mode = 'Only'; Ids = @() },
-            @{ Text = 'Everything except the slow repair'; Mode = 'Skip'; Ids = @(5) },
-            @{ Text = 'Quick tune-up';            Mode = 'Only'; Ids = $Presets.QuickTuneUp },
-            @{ Text = 'Deep clean';               Mode = 'Only'; Ids = $Presets.DeepClean },
-            @{ Text = 'Weekly safe';              Mode = 'Only'; Ids = $Presets.WeeklySafe }
-        )) {
+        if ($RunMode -eq 'Server') {
+            $presetButtons = @(
+                @{ Text = 'Select everything'; Mode = 'Skip'; Ids = @() },
+                @{ Text = 'Select nothing';    Mode = 'Only'; Ids = @() },
+                @{ Text = 'Server check';      Mode = 'Only'; Ids = $Presets.ServerCheck }
+            )
+        } else {
+            $presetButtons = @(
+                @{ Text = 'Select everything';        Mode = 'Skip'; Ids = @() },
+                @{ Text = 'Select nothing';           Mode = 'Only'; Ids = @() },
+                @{ Text = 'Everything except the slow repair'; Mode = 'Skip'; Ids = @(5) },
+                @{ Text = 'Quick tune-up';            Mode = 'Only'; Ids = $Presets.QuickTuneUp },
+                @{ Text = 'Deep clean';               Mode = 'Only'; Ids = $Presets.DeepClean },
+                @{ Text = 'Weekly safe';              Mode = 'Only'; Ids = $Presets.WeeklySafe }
+            )
+        }
+        foreach ($b in $presetButtons) {
             $btn = New-Object System.Windows.Forms.Button
             $btn.Text     = (T $b.Text)
             $btn.AutoSize = $true
@@ -2886,9 +3606,9 @@ try {
                 param($sender, $e)
                 switch ($sender.Tag) {
                     'Preview' {
-                        $ids = @($script:StepCtl.Keys | Where-Object { $script:StepCtl[$_].Check.Checked -and $script:StepCtl[$_].Check.Enabled -and (@(2, 4, 10) -contains [int]$_) })
+                        $ids = @($script:StepCtl.Keys | Where-Object { $script:StepCtl[$_].Check.Checked -and $script:StepCtl[$_].Check.Enabled -and ($PreviewIds -contains [int]$_) })
                         if ($ids.Count -eq 0) {
-                            [void](Show-Message (T 'The preview works for steps 2, 4 and 10. Tick at least one of them.') (T 'Preview cleanup') 'OK' 'Information')
+                            [void](Show-Message (T 'The preview works for steps 2, 4, 10 and 19. Tick at least one of them.') (T 'Preview cleanup') 'OK' 'Information')
                         } else { Start-Run -Preview }
                     }
                     'Tools'    { Show-ToolsDialog }
@@ -2962,6 +3682,19 @@ try {
             }
             $answer = Show-Message $note (T 'Ready to start?') 'OKCancel' 'Information'
             if ($answer -ne 'OK') { return }
+            $script:MaintWindow = $null
+            if ($RunMode -eq 'Server') {
+                $oo = Get-RunOptions
+                $needs = @($oo.Steps | Where-Object { $Gated -contains $_ -and -not ($_ -eq 7 -and $oo.OptimizeAction -eq 'Analyze') })
+                $wuInstall = (@($oo.Steps) -contains 9) -and ([string]$oo.WindowsUpdateMode -eq 'Install')
+                if ($needs.Count -gt 0 -or $wuInstall) {
+                    $list = @($needs | ForEach-Object { [string]$_ })
+                    if ($wuInstall) { $list += '9 (install updates)' }
+                    $msg = ((T 'These steps change this server: {0}.') -f ($list -join ', ')) + "`r`n`r`n" + (T 'Only continue in a planned maintenance window, with a recent backup.') + "`r`n`r`n" + (T 'Is this a maintenance window?')
+                    if ((Show-Message $msg (T 'Maintenance window') 'YesNo' 'Warning') -ne 'Yes') { return }
+                    $script:MaintWindow = $true
+                }
+            }
             Start-Run
         })
 

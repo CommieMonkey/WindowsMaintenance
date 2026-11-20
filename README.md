@@ -14,16 +14,17 @@ Start it and a simple window opens: tick the things you want, press **Start main
 4. [Quick start](#quick-start)
 5. [The window](#the-window)
 6. [What each step does](#what-each-step-does)
-7. [Command-line parameters](#command-line-parameters)
-8. [Safety design](#safety-design)
-9. [Power protection (laptops)](#power-protection-laptops)
-10. [Logging](#logging)
-11. [Running it automatically (scheduled task)](#running-it-automatically-scheduled-task)
-12. [The EXE version](#the-exe-version)
-13. [Troubleshooting](#troubleshooting)
-14. [FAQ](#faq)
-15. [Known limitations](#known-limitations)
-16. [Disclaimer](#disclaimer)
+7. [Windows Server (Server mode)](#windows-server-server-mode)
+8. [Command-line parameters](#command-line-parameters)
+9. [Safety design](#safety-design)
+10. [Power protection (laptops)](#power-protection-laptops)
+11. [Logging](#logging)
+12. [Running it automatically (scheduled task)](#running-it-automatically-scheduled-task)
+13. [The EXE version](#the-exe-version)
+14. [Troubleshooting](#troubleshooting)
+15. [FAQ](#faq)
+16. [Known limitations](#known-limitations)
+17. [Disclaimer](#disclaimer)
 
 ---
 
@@ -42,6 +43,7 @@ Start it and a simple window opens: tick the things you want, press **Start main
 - **Presets, preview and memory.** Quick tune-up / Deep clean / Weekly safe buttons, a preview of what cleanup would remove, and the window remembers your ticks and dropdown choices.
 - **Reports and checks.** Windows Update scan, disk space report, crash summary, hardware health, security check-up, and an HTML report after every run.
 - **Tools.** Startup programs, one-click repairs (network, Windows Update, search index, icon cache, print spooler, memory test) and a built-in weekly schedule.
+- **Windows Server mode.** Member servers and domain controllers, with or without a desktop: read-only health, backup, role (AD DS, DNS, DHCP, IIS, Hyper-V, cluster) and storage checks by default, changes only in a confirmed maintenance window, a text menu on Server Core, and exit codes for monitoring. See [Windows Server](#windows-server-server-mode).
 - **English and Dutch, light and dark.** One click to switch; the language follows Windows on first start.
 
 ---
@@ -63,7 +65,7 @@ Keep `Run-Maintenance.cmd` in the **same folder** as the `.ps1`. (The finished `
 
 ## Requirements
 
-- Windows 10 or Windows 11
+- Windows 10 or Windows 11, or **Windows Server 2019 / 2022 / 2025** (with or without a desktop, member server or domain controller, see [Windows Server](#windows-server-server-mode))
 - **Windows PowerShell 5.1** (the default `powershell.exe` that ships with Windows)
 - **Administrator rights** (the script asks for them itself)
 - **winget** for step 2 (installed with "App Installer" from the Microsoft Store; already present on current Windows 10/11)
@@ -247,6 +249,33 @@ Report only. Per drive: temperature, SSD wear, power-on hours and read/write err
 
 Report only. Checks Defender (real-time protection, definition age, passive mode), the firewall profiles, BitLocker on the system drive, Secure Boot, the TPM, SMBv1, Remote Desktop with Network Level Authentication and UAC. Every line starts with `OK`, `WARN` or `INFO`. Warnings do not make the step fail.
 
+### 15. Server health report (Server mode)
+
+Report only. Uptime and last start, whether a restart is pending (component servicing, Windows Update, pending file renames), free space per drive (warns under 15%, *critical* under 10%), **automatic services that are not running** (delayed-start services and a list of services that are normally stopped are ignored), critical and error events from the last 7 days per log, the date of the last installed update (warns after 60 days), personal certificates that expire within 30 days or have expired, and the **time source** (warns when it is the local clock). The firewall is covered by step 14.
+
+### 16. Backup check (Server mode)
+
+Report only. With Windows Server Backup installed: the last successful backup (warns when it is older than 7 days, when there is none or when the last attempt did not finish cleanly), versions kept and the next planned backup. If you use other backup software (Veeam, Acronis, Commvault and similar) the tool only mentions that it seems to be running. Also checks that every **VSS writer is stable** (`vssadmin list writers`) and lists the shadow storage.
+
+### 17. Server roles check (Server mode)
+
+Report only. Finds the installed roles (with `Get-WindowsFeature`, or by their service) and checks each one:
+
+- **Active Directory Domain Services** (domain controllers): the services NTDS, Netlogon, KDC, W32Time, ADWS and DFSR, the SYSVOL and NETLOGON shares, `dcdiag /q` (any output is a warning; it can take a few minutes), replication failures (`Get-ADReplicationFailure`, or `repadmin /replsummary` when the AD module is missing), the operations master roles (`netdom query fsmo`) and errors in the *Directory Service* and *DFS Replication* logs.
+- **DNS**: service, zones, forwarders, paused zones, whether the server resolves its own domain, errors in the *DNS Server* log.
+- **DHCP**: service, scopes (warns at 90% of the addresses in use) and whether the server is authorized in Active Directory.
+- **IIS**: service, sites, application pools that are not started, size of the log folder.
+- **Hyper-V**: virtual machines and their health, checkpoints older than 7 days.
+- **Failover clustering**: nodes, groups that are not online, failed resources, quorum type.
+
+### 18. Storage health (Server mode)
+
+Report only. Storage Spaces pools, virtual disks, physical disks and volumes with their health and operational status, and running storage jobs (a repair or rebuild).
+
+### 19. Server cleanup (Server mode, off by default, needs a maintenance window)
+
+Component store cleanup (`DISM /StartComponentCleanup`), the Windows Update download cache, old temp files and old IIS logs, as described under [Windows Server](#windows-server-server-mode). The advanced options switch each part on or off and set the IIS log age (leave alone, 30, 90, 180 or 365 days). The preview shows what it would do (it runs `DISM /AnalyzeComponentStore` and counts the files).
+
 ### Tools (in the window, not part of a run)
 
 - **Startup programs:** lists the Run registry keys, the Startup folders and the logon/boot scheduled tasks that are not Microsoft's. Unticking switches an item off with the same `StartupApproved` flag that Task Manager uses (or disables the scheduled task). Nothing is deleted and you can switch it back on.
@@ -265,6 +294,42 @@ A summary table of every step (status, duration, message), total time, space fre
 
 ---
 
+## Windows Server (Server mode)
+
+On Windows Server the tool switches to **Server mode** by itself (`-Mode Auto` looks at the product type; `-Mode Server` or `-Mode Pc` forces it). It works on member servers and on **domain controllers** (the window and the header show *Server (domain controller)*), with or without a desktop.
+
+**What changes**
+
+- Only the steps that make sense on a server are offered: 5 (repair), 6 (Defender), 7 (drives), 8, 9 (Windows Update), 11, 12, 13, 14 and the server steps **15 to 19**. Steps 1 to 4 and 10 are PC only (restore points, winget, Disk Cleanup, browser caches).
+- **Read-only first.** On a server only the steps that change nothing are ticked or run by default (8, 9, 11 to 18). Steps that change the system, **5 (repair), 7 (optimize), 19 (cleanup) and installing Windows updates**, are skipped unless you say it is a **maintenance window**: in the window you get a confirmation question, on the command line you add `-MaintenanceWindow`. Without it the run still works and the skipped steps show up as *Skipped* (exit code 1). Step 7 on a server only *analyzes* the drives by default, which changes nothing and needs no maintenance window.
+- **Preset `ServerCheck`** (steps 8, 9, 12, 13, 14, 15, 16, 17, 18) is the all-read-only server check. The window has a *Server check* button for it.
+- Logs and reports are saved in `C:\ProgramData\PCMaintenance\Logs` (not in a user profile), because the scheduled task runs as SYSTEM.
+- `winget upgrade --all` is never offered on a server.
+
+**Server Core (no desktop)**
+
+Without a desktop there is no window. Start the tool (the .ps1, the .cmd or the exe) from a console and a **text menu** opens: run the server check, choose steps, preview, schedule or remove the weekly run. Everything the menu does is also available with parameters: `-Preset ServerCheck`, `-Steps "8,15-18"`, `-Schedule`, `-RemoveSchedule`, and the exit codes work for monitoring. `-Menu` opens the same menu on a server that does have a desktop (for example over a remote PowerShell session).
+
+```powershell
+.\Run-Maintenance.ps1 -Preset ServerCheck                              # read-only check, no window, exit code for monitoring
+.\Run-Maintenance.ps1 -Preset ServerCheck -Schedule -ScheduleDay Sunday -ScheduleTime 03:00
+.\Run-Maintenance.ps1 -Steps "5,7,19" -MaintenanceWindow               # a repair and cleanup in a planned window
+.\Run-Maintenance.ps1 -Menu                                            # text menu
+```
+
+**Exit codes for monitoring:** `0` all fine, `1` warnings (a check printed a `WARN` line, a step was skipped, or a run was stopped), `2` failures. The `WARN` lines are also counted in the report.
+
+**Safety on servers**
+
+- Nothing is installed, repaired or deleted unless it is in a maintenance window, and the cleanup step is off by default.
+- The cleanup (step 19) removes component store leftovers (`/StartComponentCleanup`, never `/ResetBase`), the Windows Update download cache, old temp files and **old IIS logs** (`*.log` files in the `W3SVC`/`FTPSVC` site folders and `HTTPERR`, default older than 90 days, can be turned off). **Event logs are never touched.** Junctions are never followed.
+- Installing Windows updates is only possible with the advanced option *Download and install them* and a maintenance window. Nothing ever restarts the server by itself.
+- Defender is skipped when it is passive (another antivirus is active). Step 7 does not defragment unless you choose *Optimize* in a maintenance window.
+
+**Status:** written from the Windows Server documentation and **not tested on any server yet**. Test on a VM first, with and without a desktop, and on a domain controller before you rely on it.
+
+---
+
 ## Command-line parameters
 
 | Parameter | Description |
@@ -277,8 +342,12 @@ A summary table of every step (status, duration, message), total time, space fre
 | `-SkipSFC` | Don't run step 5. |
 | `-SkipDefender` | Don't run step 6. |
 | `-Reboot` | Reboot automatically 30 seconds after finishing. Uses a forced restart, so save your work first. |
-| `-Preset QuickTuneUp\|DeepClean\|WeeklySafe` | Run a ready-made selection without the window (same as the window's preset buttons). Ignored when `-Steps` is given. |
-| `-Preview` | Show what steps 2, 4 and 10 would do, without installing or deleting anything. |
+| `-Preset QuickTuneUp\|DeepClean\|WeeklySafe\|ServerCheck` | Run a ready-made selection without the window (same as the window's preset buttons; `ServerCheck` is for servers). Ignored when `-Steps` is given. |
+| `-MaintenanceWindow` | Server mode: confirms this is a planned maintenance window, so steps that change the server (5, 7 in optimize mode, 19, installing updates) may run. Without it they are skipped. |
+| `-Menu` | Open the text menu instead of the window (automatic on Server Core). |
+| `-Schedule` | Create the weekly scheduled task and exit. Use with `-Preset`, `-ScheduleDay` (default `Sunday`), `-ScheduleTime` (`HH:mm`, default `03:00`) and optionally `-MaintenanceWindow`. |
+| `-RemoveSchedule` | Remove the weekly scheduled task and exit. |
+| `-Preview` | Show what steps 2, 4, 10 and 19 would do, without installing or deleting anything. |
 | `-Mode Auto\|Pc\|Server` | Which steps to offer. `Auto` (default) picks `Server` on Windows Server and `Pc` otherwise. Steps that do not belong to the mode are hidden in the window and ignored on the command line. |
 
 The `-Skip...` switches also suppress the window (they run "everything except these").
@@ -304,9 +373,9 @@ Run-Maintenance.cmd -All
 Run-Maintenance.cmd -Steps "2,3"
 ```
 
-Exit code of an unattended run: `0` everything fine, `1` warnings (stopped by the user, or a step skipped because this PC cannot run it, for example no winget), `2` a step failed, the charger never connected, or the run could not start (invalid `-Steps`).
+Exit code of an unattended run: `0` everything fine, `1` warnings (stopped by the user, a step skipped because this PC cannot run it or because it needs `-MaintenanceWindow`, or a check printed a `WARN` line), `2` a step failed, the charger never connected, or the run could not start (invalid `-Steps`).
 
-A step that this PC cannot run (missing tool, Defender in passive mode) is skipped with the reason in the log; in the window its checkbox is greyed out with the reason shown. On Windows Server Core there is no desktop, so the window does not open: use `-All` or `-Steps`.
+A step that this PC cannot run (missing tool, Defender in passive mode) is skipped with the reason in the log; in the window its checkbox is greyed out with the reason shown. On Windows Server Core there is no desktop, so a text menu opens instead of the window (or use `-Preset`, `-All` or `-Steps`).
 
 ---
 
@@ -367,7 +436,7 @@ Everything is written to:
 %USERPROFILE%\MaintenanceLogs
 ```
 
-(When you elevate with a *different* administrator account, this is that account's profile folder.)
+(When you elevate with a *different* administrator account, this is that account's profile folder. **On a server** it is `C:\ProgramData\PCMaintenance\Logs`.)
 
 | File | Content |
 |---|---|
@@ -395,7 +464,7 @@ Transcripts older than **90 days** are deleted automatically. The CSV is never t
 
 ## Running it automatically (scheduled task)
 
-**Easiest way:** in the window press **Schedule...**, choose the day, the time and a preset (*Weekly safe* is recommended) and press *Create or update*. It copies the script to `C:\Program Files\PCMaintenance\Run-Maintenance.ps1` (administrators only, so nobody can swap the script), creates the task *PC Maintenance (weekly)* for your account with the highest privileges, **only on the charger** and **run as soon as possible if the PC was off**. Press the button again after updating the tool to refresh the copy. **Remove schedule** deletes the task (the copy stays).
+**Easiest way:** in the window press **Schedule...** (on Server Core use the text menu or `-Schedule`), choose the day, the time and a preset (*Weekly safe* is recommended) and press *Create or update*. It copies the script to `C:\Program Files\PCMaintenance\Run-Maintenance.ps1` (administrators only, so nobody can swap the script), creates the task *PC Maintenance (weekly)* with the highest privileges and **run as soon as possible if the PC was off**. On a PC it runs for your account, **only on the charger**; on a server it runs as **SYSTEM**, also when nobody is logged on, and the dialog has a checkbox for allowing changes (a standing maintenance window; off by default, so a scheduled *Server check* is read-only). Press the button again after updating the tool to refresh the copy. **Remove schedule** deletes the task (the copy stays).
 
 By hand: always use `-All` (or `-Steps` / `-Preset`) so the script runs without opening the window. Add `-SilentWinget` because a scheduled task has no desktop to show installer windows on.
 
@@ -531,6 +600,8 @@ Yes: edit the `$exclude` list at the top of step 3 in the script (wildcards allo
 
 - Built for Windows 10/11 and Windows PowerShell 5.1. Not tested on older Windows versions or on PowerShell 7.
 - The exe is a launcher around the script and must be rebuilt (`Build-Exe.cmd`) after script changes. It has not been tested on every Windows version.
+- **Server mode was written from the documentation and has not been run on a server yet.** Output formats that were assumed (for example `vssadmin`, `w32tm`, `dcdiag`) may differ on localized servers; the checks that parse text lines (VSS writers, time source) can then show an INFO line instead of a result.
+- The service check in step 15 can list services that are normally stopped; it ignores delayed-start services and a short list of known ones, not every case.
 - The window uses classic Windows Forms. It declares itself DPI aware and scales its layout, but that was not tested on high-DPI screens.
 - The Dutch translation covers the window only; logs, reports and the text printed by the steps stay English. The translation was written without a native check.
 - The winget program list is read from `winget upgrade`'s text table, so it can break if a future winget changes that table.
