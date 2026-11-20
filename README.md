@@ -38,7 +38,11 @@ Start it and a simple window opens: tick the things you want, press **Start main
 - **Real logging.** A full transcript per run plus a CSV history with one row per step per run (status, duration, error message).
 - **Resilient.** A failing step is logged and the script carries on with the next one. Hung steps have timeouts.
 - **Self-elevating.** Asks for administrator rights (UAC prompt) when needed.
-- **Unattended mode.** `-All` / `-Steps` skip the window, so it works in a scheduled task.
+- **Unattended mode.** `-All` / `-Steps` / `-Preset` skip the window, so it works in a scheduled task.
+- **Presets, preview and memory.** Quick tune-up / Deep clean / Weekly safe buttons, a preview of what cleanup would remove, and the window remembers your ticks and dropdown choices.
+- **Reports and checks.** Windows Update scan, disk space report, crash summary, hardware health, security check-up, and an HTML report after every run.
+- **Tools.** Startup programs, one-click repairs (network, Windows Update, search index, icon cache, print spooler, memory test) and a built-in weekly schedule.
+- **English and Dutch, light and dark.** One click to switch; the language follows Windows on first start.
 
 ---
 
@@ -76,7 +80,7 @@ System Protection (System Restore) is turned on for the system drive if it was o
 1. Put `Run-Maintenance.cmd` and `Run-Maintenance.ps1` in the same folder.
 2. Double-click **`Run-Maintenance.cmd`**.
 3. Accept the Windows admin prompt (UAC).
-4. Tick the steps you want (everything is ticked by default) and press **Start maintenance**.
+4. Tick the steps you want (everything except step 10, which deletes browser and update caches, is ticked by default) and press **Start maintenance**.
 
 ### Option B: from a terminal
 
@@ -106,8 +110,12 @@ Start the tool without parameters and this window opens (the black console windo
 
 **Choosing what to do**
 
-- Every step has a checkbox, a plain-language title, a short explanation and an estimate of how long it takes. Everything is ticked by default.
-- Three quick buttons at the top: **Select everything**, **Select nothing** and **Everything except the slow repair**.
+- Every step has a checkbox, a plain-language title, a short explanation and an estimate of how long it takes. Everything is ticked by default except step 10 (extra caches), which deletes and is opt-in.
+- Quick buttons at the top: **Select everything**, **Select nothing**, **Everything except the slow repair** and three presets: **Quick tune-up** (steps 4, 7, 8), **Deep clean** (1, 2, 3, 4, 5, 7, 8, 10) and **Weekly safe** (2, 6, 7, 8, 9, 14, nothing is deleted).
+- Step 2 has a **Choose which programs to update...** button: a list of programs with an update, with checkboxes. The option *Never update the programs I did not tick* uses `winget pin`, which `winget upgrade --all` respects. **Remove all pins** undoes it.
+- **Preview cleanup** runs steps 2, 4 and 10 in read-only mode: it lists the programs that would be updated, how many temp files and how many MB would be deleted, and how big the Recycle Bin is. Nothing is changed (disk cleanup, step 3, cannot be previewed).
+- **Tools...** opens the repairs and the startup manager, **Schedule...** creates the weekly task, **History...** shows `MaintenanceHistory.csv` as a table, and **Nederlands / English** and **Dark mode / Light mode** switch language and theme (the window rebuilds itself).
+- The window **remembers** the language, theme, ticked steps and advanced dropdown choices in `%APPDATA%\PCMaintenance\settings.json`.
 - At the bottom a line shows your **power status**. On a laptop that is running on battery it turns red, and the Start button will refuse to start until you plug in the charger.
 - Press **Start maintenance**. A short confirmation reminds you to save your work (and tells you if the Recycle Bin is going to be emptied for good).
 
@@ -121,7 +129,7 @@ Start the tool without parameters and this window opens (the black console windo
 
 **When it is finished**
 
-You see "All done!" (or a warning if some steps failed), how much space was freed, how long it took and whether Windows would like a restart. **Back to options** returns to the first screen.
+You see "All done!" (or a warning if some steps failed), how much space was freed, how long it took and whether Windows would like a restart. **Open report** shows the HTML report (free space before and after, every step with its log). If the window is not in front, a Windows notification tells you it finished. **Back to options** returns to the first screen.
 
 ### Advanced options
 
@@ -138,6 +146,10 @@ Tick **Show advanced options** (bottom left) and a dropdown row appears under ev
 | 6 Defender | Scan type | **Quick scan**, Update definitions only, Full scan (can take hours) |
 | 7 Optimize drives | Which drives | **All drives**, or one specific drive letter |
 | 8 Disk health | none | |
+| 9 Windows Update | What to do with updates | **Only look for updates**, Download and install them (no automatic restart) |
+| 10 Extra caches | Windows Update download cache / Delivery Optimization cache / Browser caches | **Yes**, No (each) |
+| 11, 12, 14 | none | |
+| 13 Hardware health | Online disk scan | **Skip it**, Run a read-only scan of each drive (slow) |
 
 Two more settings apply to the whole run:
 
@@ -211,9 +223,45 @@ Runs `Optimize-Volume` on every fixed NTFS/ReFS volume. Windows chooses the righ
 
 Shows the health status of every physical disk (flagging anything not "Healthy"), plus size and free space per volume.
 
+### 9. Windows Update
+
+Looks for software updates with the Windows Update service through its built-in COM interface (it follows your WSUS server if you have one) and lists them. **Driver updates are only reported, never installed.** By default nothing is installed; with the advanced option *Download and install them* it downloads and installs the updates that do not need your input. It **never restarts** the PC; a pending restart is reported at the end.
+
+### 10. Extra caches (off by default)
+
+Clears the Windows Update download folder (`SoftwareDistribution\Download`, with the update services stopped and started again), the Delivery Optimization cache and the `Cache`, `Code Cache` and `GPUCache` folders of Chrome and Edge and `cache2` of Firefox. Cookies, saved passwords, bookmarks and logins are never touched. Junctions are skipped like in step 4. Because it deletes, this step is not ticked by default, is not part of `-All`, and has to be asked for (`-Steps 10`, the *Deep clean* preset or its checkbox).
+
+### 11. Disk space report
+
+Report only. Shows free space, the size of `hiberfil.sys`, `pagefile.sys`, `swapfile.sys` and `Windows.old`, the output of `DISM /AnalyzeComponentStore`, the 12 biggest folders in the system drive, your profile and `AppData\Local`, and user profiles unused for 90+ days. It measures folders by hand, so it can take several minutes.
+
+### 12. Crash and error summary
+
+Report only. Counts and lists, for the last 30 days: blue screens (bugchecks), unexpected shutdowns (Kernel-Power 41), application crashes and hangs grouped by program, disk and file system errors, and WHEA hardware error reports.
+
+### 13. Hardware health
+
+Report only. Per drive: temperature, SSD wear, power-on hours and read/write error counters; the battery's full-charge capacity compared to when it was new; optionally a read-only online disk scan (`Repair-Volume -Scan`). It warns about heavily worn SSDs, hot drives, drive errors and batteries under 60%.
+
+### 14. Security check-up
+
+Report only. Checks Defender (real-time protection, definition age, passive mode), the firewall profiles, BitLocker on the system drive, Secure Boot, the TPM, SMBv1, Remote Desktop with Network Level Authentication and UAC. Every line starts with `OK`, `WARN` or `INFO`. Warnings do not make the step fail.
+
+### Tools (in the window, not part of a run)
+
+- **Startup programs:** lists the Run registry keys, the Startup folders and the logon/boot scheduled tasks that are not Microsoft's. Unticking switches an item off with the same `StartupApproved` flag that Task Manager uses (or disables the scheduled task). Nothing is deleted and you can switch it back on.
+- **Reset the network:** `netsh winsock reset`, `netsh int ip reset` and a DNS flush. Restart afterwards.
+- **Reset Windows Update:** stops the update services, renames `SoftwareDistribution` and `catroot2` to `.bak-<date>` and starts the services again.
+- **Rebuild the search index:** stops the Search service, removes `Windows.edb` and starts it again so it is rebuilt.
+- **Rebuild the icon cache:** removes the icon cache files; the desktop restarts briefly.
+- **Restart the print spooler:** restarts it and removes stuck print jobs (documents in the queue are lost).
+- **Test the memory:** opens `mdsched.exe`, which asks whether to restart now or at the next start.
+
+Each repair asks for confirmation first.
+
 ### At the end
 
-A summary table of every step (status, duration, message), total time, space freed, the log locations, and a warning if a reboot is pending.
+A summary table of every step (status, duration, message), total time, space freed, the log locations, the path of the HTML report, and a warning if a reboot is pending.
 
 ---
 
@@ -221,7 +269,7 @@ A summary table of every step (status, duration, message), total time, space fre
 
 | Parameter | Description |
 |---|---|
-| `-All` | Run every step without opening the window. Use this for scheduled tasks. |
+| `-All` | Run every default step without opening the window. Use this for scheduled tasks. Step 10 (extra caches) is not included: it deletes, so you have to ask for it with `-Steps` or `-Preset DeepClean`. |
 | `-Steps "1,3,5-6"` | Run only these steps, without the window. Accepts lists and ranges. |
 | `-SilentWinget` | Run winget with `--silent` (no installer windows). |
 | `-IgnorePower` | Skip the charger check (see below). |
@@ -229,6 +277,8 @@ A summary table of every step (status, duration, message), total time, space fre
 | `-SkipSFC` | Don't run step 5. |
 | `-SkipDefender` | Don't run step 6. |
 | `-Reboot` | Reboot automatically 30 seconds after finishing. Uses a forced restart, so save your work first. |
+| `-Preset QuickTuneUp\|DeepClean\|WeeklySafe` | Run a ready-made selection without the window (same as the window's preset buttons). Ignored when `-Steps` is given. |
+| `-Preview` | Show what steps 2, 4 and 10 would do, without installing or deleting anything. |
 | `-Mode Auto\|Pc\|Server` | Which steps to offer. `Auto` (default) picks `Server` on Windows Server and `Pc` otherwise. Steps that do not belong to the mode are hidden in the window and ignored on the command line. |
 
 The `-Skip...` switches also suppress the window (they run "everything except these").
@@ -335,7 +385,9 @@ Everything is written to:
 | `Message` | Error text for failed steps, or `Not selected` / reason for skipped steps |
 | `Os` | Windows name, build, edition and install type (Client / Server / Server Core) |
 
-The first lines of every transcript also show this system line. A history file from an older version (without `Os`) is renamed to `MaintenanceHistory_before-os-column.csv` the first time the new version runs.
+The first lines of every transcript also show this system line. Every full run also writes `Report_<date>.html` next to the logs (free space before and after, a table of the steps and the log of each step); reports are cleaned up after 90 days like the transcripts. Preview runs write neither a CSV row nor a report.
+
+A history file from an older version (without `Os`) is renamed to `MaintenanceHistory_before-os-column.csv` the first time the new version runs.
 
 Transcripts older than **90 days** are deleted automatically. The CSV is never trimmed.
 
@@ -343,7 +395,9 @@ Transcripts older than **90 days** are deleted automatically. The CSV is never t
 
 ## Running it automatically (scheduled task)
 
-Always use `-All` (or `-Steps`) so the script runs without opening the window. Add `-SilentWinget` because a scheduled task has no desktop to show installer windows on.
+**Easiest way:** in the window press **Schedule...**, choose the day, the time and a preset (*Weekly safe* is recommended) and press *Create or update*. It copies the script to `C:\Program Files\PCMaintenance\Run-Maintenance.ps1` (administrators only, so nobody can swap the script), creates the task *PC Maintenance (weekly)* for your account with the highest privileges, **only on the charger** and **run as soon as possible if the PC was off**. Press the button again after updating the tool to refresh the copy. **Remove schedule** deletes the task (the copy stays).
+
+By hand: always use `-All` (or `-Steps` / `-Preset`) so the script runs without opening the window. Add `-SilentWinget` because a scheduled task has no desktop to show installer windows on.
 
 ```powershell
 $action  = New-ScheduledTaskAction -Execute "powershell.exe" `
@@ -477,7 +531,10 @@ Yes: edit the `$exclude` list at the top of step 3 in the script (wildcards allo
 
 - Built for Windows 10/11 and Windows PowerShell 5.1. Not tested on older Windows versions or on PowerShell 7.
 - The exe is a launcher around the script and must be rebuilt (`Build-Exe.cmd`) after script changes. It has not been tested on every Windows version.
-- The window uses classic Windows Forms and is not tuned for very high display scaling (text may look slightly soft on some screens).
+- The window uses classic Windows Forms. It declares itself DPI aware and scales its layout, but that was not tested on high-DPI screens.
+- The Dutch translation covers the window only; logs, reports and the text printed by the steps stay English. The translation was written without a native check.
+- The winget program list is read from `winget upgrade`'s text table, so it can break if a future winget changes that table.
+- The schedule dialog creates a task that runs while you are logged on (it needs your session, not a service account).
 - Power loss **during** a step cannot be prevented, only between steps.
 - The window shows no live percentage for SFC and DISM, only their output when they finish a line.
 - "Stop after this step" cannot interrupt a step that is already running.
